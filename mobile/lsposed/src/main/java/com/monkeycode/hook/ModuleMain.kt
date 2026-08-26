@@ -4,14 +4,15 @@ import android.content.SharedPreferences
 import android.util.Log
 import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedModule
+import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam
+import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
+import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam
 
 class ModuleMain : XposedModule() {
 
     companion object {
         const val TAG = "MonkeyCode"
         private var prefs: SharedPreferences? = null
-
-        val currentModule: ModuleMain? = null
 
         fun getBoolPref(key: String): Boolean = prefs?.getBoolean(key, false) ?: false
     }
