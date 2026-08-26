@@ -17,6 +17,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -38,17 +40,10 @@ jobs:
       - name: Prebuild Android
         run: npx expo prebuild --platform android --clean
 
-      - name: Build LSPosed module
-        working-directory: mobile/lsposed
-        run: |
-          chmod +x ../../gradlew
-          ../../gradlew :lsposed:assembleRelease
-
       - name: Build Android APK
         run: |
-          cd android
           chmod +x gradlew
-          ./gradlew assembleRelease
+          ./gradlew :app:assembleRelease
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -56,26 +51,58 @@ jobs:
           name: monkeycode-apk
           path: mobile/android/app/build/outputs/apk/release/app-release.apk
 
+  build-lsposed:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build LSPosed module
+        working-directory: mobile/lsposed
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease
+
       - name: Upload LSPosed module
         uses: actions/upload-artifact@v4
         with:
           name: monkeycode-lsposed
-          path: mobile/lsposed/build/outputs/apk/release/lsposed-release.apk
+          path: mobile/lsposed/build/outputs/apk/release/*.apk
 
   release:
-    needs: build
-    if: github.ref == 'refs/heads/main'
+    needs: [build, build-lsposed]
+    if: github.ref == 'refs/heads/main' && always()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: monkeycode-apk
           path: artifacts
+          merge-multiple: true
 
       - uses: actions/download-artifact@v4
         with:
           name: monkeycode-lsposed
           path: artifacts
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: Check APK exists
+        run: |
+          ls -la artifacts/
+          if [ ! -f "artifacts/app-release.apk" ]; then
+            echo "APK not found, aborting release"
+            exit 1
+          fi
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -84,7 +111,7 @@ jobs:
           tag_name: "mobile-build-${{ github.run_number }}"
           files: |
             artifacts/app-release.apk
-            artifacts/lsposed-release.apk
+            artifacts/*.apk
           draft: false
           prerelease: true
           generate_release_notes: true

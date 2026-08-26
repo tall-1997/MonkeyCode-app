@@ -138,37 +138,20 @@ class SyncEngine {
 
   private async processEntry(entry: SyncQueueEntry): Promise<void> {
     const payload = typeof entry.payload === 'string' ? JSON.parse(entry.payload as string) : entry.payload;
-    switch (entry.action) {
-      case 'create':
-        await request(`/api/v1/sync/push`, {
-          method: 'POST',
-          body: JSON.stringify({ entityType: entry.entityType, entityId: entry.entityId, action: 'create', payload }),
-        });
-        break;
-      case 'update':
-        await request(`/api/v1/sync/push`, {
-          method: 'POST',
-          body: JSON.stringify({ entityType: entry.entityType, entityId: entry.entityId, action: 'update', payload }),
-        });
-        break;
-      case 'delete':
-        await request(`/api/v1/sync/push`, {
-          method: 'POST',
-          body: JSON.stringify({ entityType: entry.entityType, entityId: entry.entityId, action: 'delete', payload }),
-        });
-        break;
-    }
+    const body = JSON.stringify({ entityType: entry.entityType, entityId: entry.entityId, action: entry.action, payload });
+    await request(`/api/v1/sync/push`, {
+      method: 'POST',
+      body,
+    });
   }
 
   private async pullRemoteUpdates(result: SyncResult): Promise<void> {
     try {
       const lastSyncTime = await this.getLastSyncTime();
-      const response = await request(`/api/v1/sync/pull`, {
+      const data = await request(`/api/v1/sync/pull`, {
         method: 'POST',
         body: JSON.stringify({ lastSyncTime }),
-      });
-
-      const data = await response.json();
+      }) as any;
       if (data.changes) {
         const db = await getDatabase();
         for (const change of data.changes) {

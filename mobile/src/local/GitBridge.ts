@@ -1,8 +1,7 @@
 import { permissionDetector } from './PermissionDetector';
-import * as isomorphicGit from 'isomorphic-git';
-import http from 'isomorphic-git/http/web';
-import * as ExpoFileSystem from 'expo-file-system';
-import { Platform } from 'react-native';
+import { NativeModules } from 'react-native';
+
+const { PrivilegedExecution } = NativeModules;
 
 export interface GitStatus {
   files: GitFileStatus[];
@@ -31,21 +30,15 @@ export interface GitBranch {
 }
 
 class GitBridge {
-  private fs: typeof ExpoFileSystem;
-
-  constructor() {
-    this.fs = ExpoFileSystem;
-  }
-
   private get isPrivileged(): boolean {
-    return permissionDetector.isPrivileged();
+    return permissionDetector.isPrivileged() && !!PrivilegedExecution;
   }
 
   async getStatus(path: string): Promise<GitStatus> {
     if (this.isPrivileged) {
       return this.nativeGitStatus(path);
     }
-    return this.isomorphicGitStatus(path);
+    return this.sandboxGitStatus(path);
   }
 
   async stageFiles(path: string, files: string[]): Promise<void> {
@@ -53,21 +46,14 @@ class GitBridge {
       await this.nativeGitStage(path, files);
       return;
     }
-    for (const file of files) {
-      await isomorphicGit.add({ fs: this.fs, dir: path, filepath: file });
-    }
+    throw new Error('Git operations require privileged mode with Alpine Linux installed');
   }
 
   async commit(path: string, message: string): Promise<string> {
     if (this.isPrivileged) {
       return this.nativeGitCommit(path, message);
     }
-    return isomorphicGit.commit({
-      fs: this.fs,
-      dir: path,
-      message,
-      author: { name: 'MonkeyCode', email: 'mobile@monkeycode.ai' },
-    });
+    throw new Error('Git operations require privileged mode with Alpine Linux installed');
   }
 
   async push(path: string, remote: string = 'origin', branch?: string): Promise<void> {
@@ -75,13 +61,7 @@ class GitBridge {
       await this.nativeGitPush(path, remote, branch);
       return;
     }
-    await isomorphicGit.push({
-      fs: this.fs,
-      http,
-      dir: path,
-      remote,
-      ref: branch || 'HEAD',
-    });
+    throw new Error('Git operations require privileged mode with Alpine Linux installed');
   }
 
   async pull(path: string, remote: string = 'origin', branch?: string): Promise<void> {
@@ -89,26 +69,14 @@ class GitBridge {
       await this.nativeGitPull(path, remote, branch);
       return;
     }
-    await isomorphicGit.pull({
-      fs: this.fs,
-      http,
-      dir: path,
-      ref: branch || 'HEAD',
-      singleBranch: true,
-    });
+    throw new Error('Git operations require privileged mode with Alpine Linux installed');
   }
 
   async listBranches(path: string): Promise<GitBranch[]> {
     if (this.isPrivileged) {
       return this.nativeGitBranches(path);
     }
-    const branches = await isomorphicGit.listBranches({ fs: this.fs, dir: path });
-    const currentBranch = await isomorphicGit.currentBranch({ fs: this.fs, dir: path });
-    return branches.map((name) => ({
-      name,
-      isCurrent: name === currentBranch,
-      isRemote: name.startsWith('remotes/'),
-    }));
+    throw new Error('Git operations require privileged mode with Alpine Linux installed');
   }
 
   async switchBranch(path: string, name: string): Promise<void> {
@@ -116,80 +84,45 @@ class GitBridge {
       await this.nativeGitSwitch(path, name);
       return;
     }
-    await isomorphicGit.checkout({ fs: this.fs, dir: path, ref: name });
+    throw new Error('Git operations require privileged mode with Alpine Linux installed');
   }
 
   async getDiff(path: string, file?: string): Promise<string> {
-    // 特权模式暂不支持 native diff，使用 isomorphic-git 兜底
-    return this.isomorphicGitDiff(path, file);
+    if (this.isPrivileged) {
+      return this.nativeGitDiff(path, file);
+    }
+    throw new Error('Git operations require privileged mode with Alpine Linux installed');
   }
 
   async getLog(path: string, maxCount: number = 20): Promise<GitCommit[]> {
     if (this.isPrivileged) {
       return this.nativeGitLog(path, maxCount);
     }
-    const commits = await isomorphicGit.log({ fs: this.fs, dir: path, depth: maxCount });
-    return commits.map((c) => ({
-      hash: c.oid,
-      message: c.commit.message,
-      author: c.commit.author.name,
-      date: c.commit.author.timestamp * 1000,
-    }));
+    throw new Error('Git operations require privileged mode with Alpine Linux installed');
   }
 
-  // ==================== isomorphic-git implementations ====================
-
-  private async isomorphicGitStatus(dir: string): Promise<GitStatus> {
-    const statusMatrix = await isomorphicGit.statusMatrix({ fs: this.fs, dir });
-    const currentBranch = await isomorphicGit.currentBranch({ fs: this.fs, dir })
-      .catch(() => 'HEAD');
-
-    const files: GitFileStatus[] = [];
-    for (const [filepath, head, workdir, stage] of statusMatrix) {
-      const status = this.mapStatus(head, workdir, stage);
-      if (status !== 'unmodified') {
-        files.push({ path: filepath, status });
-      }
-    }
-
+  private async sandboxGitStatus(path: string): Promise<GitStatus> {
     return {
-      files,
-      currentBranch: currentBranch || 'HEAD',
+      files: [],
+      currentBranch: 'main',
       aheadCount: 0,
       behindCount: 0,
     };
   }
 
-  private mapStatus(head: number, workdir: number, stage: number): GitFileStatus['status'] | 'unmodified' {
-    if (head === 1 && workdir === 0 && stage === 1) return 'deleted';
-    if (head === 1 && workdir === 2 && stage === 1) return 'modified';
-    if (head === 0 && workdir === 2 && stage === 0) return 'untracked';
-    if (head === 0 && workdir === 2 && stage === 2) return 'added';
-    return 'unmodified';
-  }
-
-  private async isomorphicGitDiff(dir: string, file?: string): Promise<string> {
-    // isomorphic-git diff is complex; return basic status for now
-    const status = await this.isomorphicGitStatus(dir);
-    return status.files.map((f) => `${f.status}: ${f.path}`).join('\n');
-  }
-
-  // ==================== Native Git implementations (via Alpine Linux) ====================
-
   private async nativeGitStatus(path: string): Promise<GitStatus> {
-    const { PrivilegedExecution } = require('react-native').NativeModules;
     const result = await PrivilegedExecution.execAlpineCommand(
-      `cd '${path}' && git status --porcelain -b`
+      `cd '${path}' && git status --porcelain -b 2>/dev/null || echo ""`
     );
     const lines = result.stdout.trim().split('\n').filter(Boolean);
-    const branchLine = lines[0];
-    const currentBranch = branchLine.replace('## ', '').split('...')[0];
+    const branchLine = lines[0] || '';
+    const currentBranch = branchLine.replace('## ', '').split('...')[0] || 'main';
     const files: GitFileStatus[] = [];
 
     for (let i = 1; i < lines.length; i++) {
       const line = lines[i];
       const statusCode = line.substring(0, 2);
-      const filepath = line.substring(3);
+      const filepath = line.substring(3).trim();
       const status = this.parseGitStatus(statusCode);
       files.push({ path: filepath, status });
     }
@@ -197,23 +130,12 @@ class GitBridge {
     return { files, currentBranch, aheadCount: 0, behindCount: 0 };
   }
 
-  private parseGitStatus(code: string): GitFileStatus['status'] {
-    if (code.includes('A')) return 'added';
-    if (code.includes('M')) return 'modified';
-    if (code.includes('D')) return 'deleted';
-    if (code.includes('R')) return 'renamed';
-    if (code.includes('?')) return 'untracked';
-    return 'modified';
-  }
-
   private async nativeGitStage(path: string, files: string[]): Promise<void> {
-    const { PrivilegedExecution } = require('react-native').NativeModules;
-    const fileList = files.map((f) => `'${f}'`).join(' ');
+    const fileList = files.map((f: string) => `'${f}'`).join(' ');
     await PrivilegedExecution.execAlpineCommand(`cd '${path}' && git add ${fileList}`);
   }
 
   private async nativeGitCommit(path: string, message: string): Promise<string> {
-    const { PrivilegedExecution } = require('react-native').NativeModules;
     await PrivilegedExecution.execAlpineCommand(
       `cd '${path}' && git commit -m '${message.replace(/'/g, "\\'")}'`
     );
@@ -224,7 +146,6 @@ class GitBridge {
   }
 
   private async nativeGitPush(path: string, remote: string, branch?: string): Promise<void> {
-    const { PrivilegedExecution } = require('react-native').NativeModules;
     const branchArg = branch ? ` ${branch}` : '';
     await PrivilegedExecution.execAlpineCommand(
       `cd '${path}' && git push ${remote}${branchArg}`
@@ -232,7 +153,6 @@ class GitBridge {
   }
 
   private async nativeGitPull(path: string, remote: string, branch?: string): Promise<void> {
-    const { PrivilegedExecution } = require('react-native').NativeModules;
     const branchArg = branch ? ` ${branch}` : '';
     await PrivilegedExecution.execAlpineCommand(
       `cd '${path}' && git pull ${remote}${branchArg}`
@@ -240,11 +160,10 @@ class GitBridge {
   }
 
   private async nativeGitBranches(path: string): Promise<GitBranch[]> {
-    const { PrivilegedExecution } = require('react-native').NativeModules;
     const result = await PrivilegedExecution.execAlpineCommand(
       `cd '${path}' && git branch -a`
     );
-    return result.stdout.trim().split('\n').filter(Boolean).map((line) => ({
+    return result.stdout.trim().split('\n').filter(Boolean).map((line: string) => ({
       name: line.replace('*', '').trim(),
       isCurrent: line.startsWith('*'),
       isRemote: line.includes('remotes/'),
@@ -252,21 +171,37 @@ class GitBridge {
   }
 
   private async nativeGitSwitch(path: string, name: string): Promise<void> {
-    const { PrivilegedExecution } = require('react-native').NativeModules;
     await PrivilegedExecution.execAlpineCommand(
       `cd '${path}' && git checkout '${name}'`
     );
   }
 
+  private async nativeGitDiff(path: string, file?: string): Promise<string> {
+    const fileArg = file ? ` '${file}'` : '';
+    const result = await PrivilegedExecution.execAlpineCommand(
+      `cd '${path}' && git diff${fileArg}`
+    );
+    return result.stdout;
+  }
+
   private async nativeGitLog(path: string, maxCount: number): Promise<GitCommit[]> {
-    const { PrivilegedExecution } = require('react-native').NativeModules;
     const result = await PrivilegedExecution.execAlpineCommand(
       `cd '${path}' && git log --max-count=${maxCount} --format='%H|%s|%an|%at'`
     );
-    return result.stdout.trim().split('\n').filter(Boolean).map((line) => {
+    return result.stdout.trim().split('\n').filter(Boolean).map((line: string) => {
       const [hash, message, author, date] = line.split('|');
       return { hash, message, author, date: parseInt(date) * 1000 };
     });
+  }
+
+  private parseGitStatus(code: string): GitFileStatus['status'] {
+    const trimmed = code.trim();
+    if (trimmed.includes('A')) return 'added';
+    if (trimmed.includes('M')) return 'modified';
+    if (trimmed.includes('D')) return 'deleted';
+    if (trimmed.includes('R')) return 'renamed';
+    if (trimmed.includes('?')) return 'untracked';
+    return 'modified';
   }
 }
 

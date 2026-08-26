@@ -22,7 +22,6 @@ class FileSystemBridge {
     if (this.mode === 'privileged' && PrivilegedExecution) {
       return PrivilegedExecution.listDirectory(path);
     }
-    // 沙箱模式：使用 expo-file-system
     const items = await ExpoFileSystem.readDirectoryAsync(path);
     const entries: FileEntry[] = [];
     for (const name of items) {
@@ -32,8 +31,8 @@ class FileSystemBridge {
         name,
         path: fullPath,
         isDirectory: info.isDirectory ?? false,
-        size: info.size ?? 0,
-        modificationTime: info.modificationTime ?? 0,
+        size: (info as any).size ?? 0,
+        modificationTime: (info as any).modificationTime ?? 0,
       });
     }
     return entries.sort((a, b) => {
@@ -46,9 +45,11 @@ class FileSystemBridge {
     if (this.mode === 'privileged' && PrivilegedExecution) {
       return PrivilegedExecution.readFile(path, encoding);
     }
-    const content = await ExpoFileSystem.readAsStringAsync(path, {
-      encoding: encoding === 'base64' ? ExpoFileSystem.EncodingType.Base64 : ExpoFileSystem.EncodingType.UTF8,
-    });
+    const options: any = {};
+    if (encoding === 'base64') {
+      options.encoding = 'base64';
+    }
+    const content = await ExpoFileSystem.readAsStringAsync(path, options);
     return content;
   }
 
@@ -84,8 +85,8 @@ class FileSystemBridge {
     return {
       exists: info.exists,
       isDirectory: info.isDirectory ?? false,
-      size: info.size ?? 0,
-      modificationTime: info.modificationTime ?? 0,
+      size: (info as any).size ?? 0,
+      modificationTime: (info as any).modificationTime ?? 0,
     };
   }
 }

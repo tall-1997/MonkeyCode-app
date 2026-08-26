@@ -1,14 +1,27 @@
 plugins {
-    id('com.android.library')
-    id('org.jetbrains.kotlin.android')
+    id("com.android.application") version "8.7.3"
+    id("org.jetbrains.kotlin.android") version "2.0.21"
 }
 
 android {
     namespace = "com.monkeycode.hook"
-    compileSdk = 35
+    compileSdk = 34
 
     defaultConfig {
-        minSdk = 34
+        applicationId = "com.monkeycode.hook"
+        minSdk = 26
+        versionCode = 1
+        versionName = "1.0"
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+        }
+    }
+
+    lint {
+        abortOnError = false
     }
 
     compileOptions {
@@ -23,5 +36,4 @@ android {
 
 dependencies {
     compileOnly("de.robv.android.xposed:api:82")
-    compileOnly("org.lsposed.lsparanoid:lsparanoid:0.6.0")
 }
