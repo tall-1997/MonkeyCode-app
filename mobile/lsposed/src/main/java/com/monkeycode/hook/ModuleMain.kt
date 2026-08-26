@@ -1,71 +1,67 @@
 package com.monkeycode.hook
 
 import android.content.SharedPreferences
-import de.robv.android.xposed.IXposedHookLoadPackage
-import de.robv.android.xposed.IXposedHookZygoteInit
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
-import de.robv.android.xposed.callbacks.XC_LoadPackage
+import android.util.Log
+import io.github.libxposed.api.XposedInterface
+import io.github.libxposed.api.XposedModule
 
-class ModuleMain : IXposedHookLoadPackage, IXposedHookZygoteInit {
+class ModuleMain : XposedModule() {
 
     companion object {
+        const val TAG = "MonkeyCode"
         private var prefs: SharedPreferences? = null
 
-        fun getPrefs(): SharedPreferences? = prefs
+        val currentModule: ModuleMain? = null
 
-        fun isEnabled(key: String): Boolean {
-            return prefs?.getBoolean(key, false) ?: false
+        fun getBoolPref(key: String): Boolean = prefs?.getBoolean(key, false) ?: false
+    }
+
+    override fun onModuleLoaded(param: ModuleLoadedParam) {
+        log(Log.INFO, TAG, "MonkeyCode LSPosed module loaded in process: ${param.processName}")
+        prefs = getRemotePreferences("com.monkeycode.hook")
+
+        // 过滤无关进程：仅保留 system_server、SystemUI、厂商助手进程
+        val processName = param.processName
+        val relevant = processName == "android" ||
+            processName.contains("systemui") ||
+            processName.contains("speechassist") ||
+            processName.contains("voiceassist") ||
+            processName.contains("miui.voiceassist")
+
+        if (!relevant) {
+            detach()
         }
     }
 
-    override fun initZygote(startupParam: IXposedHookZygoteInit.StartupParam) {
-        // 初始化 RemotePreferences
-        try {
-            prefs = XposedHelpers.callStaticMethod(
-                XposedHelpers.findClass("org.lsposed.lspd.service.XposedService", null),
-                "getRemotePreferences",
-                "com.monkeycode.hook"
-            ) as? SharedPreferences
-        } catch (e: Exception) {
-            XposedBridge.log("[MonkeyCode] Failed to init RemotePreferences: ${e.message}")
+    override fun onSystemServerStarting(param: SystemServerStartingParam) {
+        if (getBoolPref("system_hook_enabled")) {
+            SystemServerHook.handle(this, param.classLoader)
         }
     }
 
-    override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
-        val packageName = lpparam.packageName
-
-        // 过滤无关进程
-        if (lpparam.processName != packageName && !lpparam.processName.endsWith(":core")) {
-            return
-        }
-
-        when (packageName) {
+    override fun onPackageReady(param: PackageReadyParam) {
+        when (param.packageName) {
             "android" -> {
-                // system_server: 电源键接管、数字助理配置
-                if (isEnabled("system_hook_enabled")) {
-                    SystemServerHook.handle(lpparam)
+                if (getBoolPref("system_hook_enabled")) {
+                    SystemServerHook.handle(this, param.classLoader)
                 }
             }
 
             "com.android.systemui" -> {
-                // SystemUI: 手势条拦截
-                if (isEnabled("system_hook_enabled")) {
-                    SystemUIHook.handle(lpparam)
+                if (getBoolPref("system_hook_enabled")) {
+                    SystemUIHook.handle(this, param.classLoader)
                 }
             }
 
-            // 厂商助手
             "com.coloros.speechassist" -> {
-                if (isEnabled("assistant_hook_enabled")) {
-                    ColorOSAssistantHook.handle(lpparam)
+                if (getBoolPref("assistant_hook_enabled")) {
+                    ColorOSAssistantHook.handle(this, param.classLoader)
                 }
             }
 
             "com.miui.voiceassist" -> {
-                if (isEnabled("assistant_hook_enabled")) {
-                    HyperOSAssistantHook.handle(lpparam)
+                if (getBoolPref("assistant_hook_enabled")) {
+                    HyperOSAssistantHook.handle(this, param.classLoader)
                 }
             }
         }
@@ -73,68 +69,87 @@ class ModuleMain : IXposedHookLoadPackage, IXposedHookZygoteInit {
 }
 
 object SystemServerHook {
-    fun handle(lpparam: XC_LoadPackage.LoadPackageParam) {
+    fun handle(module: XposedModule, classLoader: ClassLoader) {
+        module.log(Log.INFO, ModuleMain.TAG, "SystemServerHook installing")
         try {
-            // Hook 电源键处理
-            val phoneWindowManagerClass = XposedHelpers.findClass(
+            // Hook PhoneWindowManager 的电源键处理
+            val pwClass = Class.forName(
                 "com.android.server.policy.PhoneWindowManager",
-                lpparam.classLoader
+                false,
+                classLoader
+            )
+            val keyEventClass = Class.forName("android.view.KeyEvent", false, classLoader)
+            val method = pwClass.getDeclaredMethod(
+                "interceptPowerKeyDown",
+                keyEventClass,
+                Boolean::class.javaPrimitiveType
             )
 
-            XposedHelpers.findAndHookMethod(
-                phoneWindowManagerClass,
-                "interceptPowerKeyDown",
-                "android.view.KeyEvent",
-                Boolean::class.javaPrimitiveType,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (!isEnabled("system_hook_enabled")) return
-                        // 电源键按下时，检查是否应路由到 MonkeyCode 助手
-                        XposedBridge.log("[MonkeyCode] Power key intercepted")
-                    }
-                }
+            module.hook(method).intercept { chain ->
+                module.log(Log.INFO, ModuleMain.TAG, "Power key intercepted")
+                chain.proceed()
+            }
+            module.log(Log.INFO, ModuleMain.TAG, "Power key hook installed")
+        } catch (e: Throwable) {
+            module.log(Log.WARN, ModuleMain.TAG, "SystemServerHook power key hook failed: ${e.message}")
+        }
+
+        try {
+            // Hook VoiceInteractionManagerService 配置修复
+            val serviceClass = Class.forName(
+                "com.android.server.voiceinteraction.VoiceInteractionManagerService",
+                false,
+                classLoader
             )
-        } catch (e: Exception) {
-            XposedBridge.log("[MonkeyCode] SystemServerHook failed: ${e.message}")
+            val method = serviceClass.getDeclaredMethod(
+                "onBootPhase",
+                Int::class.javaPrimitiveType
+            )
+            module.hook(method)
+                .setPriority(XposedInterface.PRIORITY_HIGHEST)
+                .intercept { chain ->
+                    chain.proceed()
+                    null
+                }
+        } catch (e: Throwable) {
+            // VoiceInteractionManagerService 可能因 ROM 不同而缺失，忽略
+            module.log(Log.WARN, ModuleMain.TAG, "SystemServerHook voice interaction hook failed: ${e.message}")
         }
     }
 }
 
 object SystemUIHook {
-    fun handle(lpparam: XC_LoadPackage.LoadPackageParam) {
+    fun handle(module: XposedModule, classLoader: ClassLoader) {
+        module.log(Log.INFO, ModuleMain.TAG, "SystemUIHook installing")
         try {
-            // Hook 手势条长按
-            XposedBridge.log("[MonkeyCode] SystemUIHook installed")
-        } catch (e: Exception) {
-            XposedBridge.log("[MonkeyCode] SystemUIHook failed: ${e.message}")
+            // 核心手势条/识别入口拦截，具体 Hook 点需按 ROM 版本适配
+            // 保留安装记录便于后续版本补充实现
+        } catch (e: Throwable) {
+            module.log(Log.WARN, ModuleMain.TAG, "SystemUIHook failed: ${e.message}")
         }
     }
 }
 
 object ColorOSAssistantHook {
-    fun handle(lpparam: XC_LoadPackage.LoadPackageParam) {
+    fun handle(module: XposedModule, classLoader: ClassLoader) {
+        module.log(Log.INFO, ModuleMain.TAG, "ColorOSAssistantHook installing")
         try {
-            XposedBridge.log("[MonkeyCode] ColorOSAssistantHook installed")
-            // 小布助手入口接管
-            // 具体 Hook 点需要根据 ROM 版本适配
-        } catch (e: Exception) {
-            XposedBridge.log("[MonkeyCode] ColorOSAssistantHook failed: ${e.message}")
+            // 小布助手入口接管，具体 Hook 点需按 ColorOS ROM 适配
+            // 保留安装记录便于后续版本补充实现
+        } catch (e: Throwable) {
+            module.log(Log.WARN, ModuleMain.TAG, "ColorOSAssistantHook failed: ${e.message}")
         }
     }
 }
 
 object HyperOSAssistantHook {
-    fun handle(lpparam: XC_LoadPackage.LoadPackageParam) {
+    fun handle(module: XposedModule, classLoader: ClassLoader) {
+        module.log(Log.INFO, ModuleMain.TAG, "HyperOSAssistantHook installing")
         try {
-            XposedBridge.log("[MonkeyCode] HyperOSAssistantHook installed")
-            // 小爱同学入口接管
-            // 具体 Hook 点需要根据 ROM 版本适配
-        } catch (e: Exception) {
-            XposedBridge.log("[MonkeyCode] HyperOSAssistantHook failed: ${e.message}")
+            // 小爱同学入口接管，具体 Hook 点需按 HyperOS 版本适配
+            // 保留安装记录便于后续版本补充实现
+        } catch (e: Throwable) {
+            module.log(Log.WARN, ModuleMain.TAG, "HyperOSAssistantHook failed: ${e.message}")
         }
     }
-}
-
-private fun isEnabled(key: String): Boolean {
-    return ModuleMain.getPrefs()?.getBoolean(key, false) ?: false
 }
