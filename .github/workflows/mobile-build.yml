@@ -22,6 +22,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: mobile/package-lock.json
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -31,6 +33,17 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            mobile/android/.gradle
+          key: gradle-${{ runner.os }}-${{ hashFiles('mobile/android/gradle/wrapper/gradle-wrapper.properties', 'mobile/package-lock.json') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
 
       - name: Install dependencies
         run: npm install
@@ -42,7 +55,7 @@ jobs:
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew :app:assembleRelease
+          ./gradlew :app:assembleRelease --no-daemon
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -65,11 +78,22 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Cache Gradle (LSPosed)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            mobile/lsposed/build
+          key: lsposed-gradle-${{ runner.os }}-${{ hashFiles('mobile/lsposed/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            lsposed-gradle-${{ runner.os }}-
+
       - name: Build LSPosed module
         working-directory: mobile/lsposed
         run: |
           chmod +x gradlew
-          ./gradlew assembleRelease
+          ./gradlew assembleRelease --no-daemon
 
       - name: Upload LSPosed module
         uses: actions/upload-artifact@v4
