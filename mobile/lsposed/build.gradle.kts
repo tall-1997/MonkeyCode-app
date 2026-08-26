@@ -1,6 +1,5 @@
 plugins {
     id("com.android.application") version "9.2.1"
-    id("org.jetbrains.kotlin.android") version "2.1.20"
 }
 
 android {
@@ -29,10 +28,6 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
-    }
-
-    kotlinOptions {
-        jvmTarget = "21"
     }
 
     packaging {
