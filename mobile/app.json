@@ -39,7 +39,12 @@
       "package": "com.chaitin.baizhi.monkeycode",
       "versionCode": 1,
       "permissions": [
-        "RECORD_AUDIO"
+        "RECORD_AUDIO",
+        "SYSTEM_ALERT_WINDOW",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_SPECIAL_USE",
+        "POST_NOTIFICATIONS",
+        "QUERY_ALL_PACKAGES"
       ],
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
@@ -93,6 +98,7 @@
       ],
       "./plugins/withDouyinLogin",
       "./plugins/withAndroidFileSaver",
+      "./plugins/withPrivilegedExecution",
       [
         "expo-build-properties",
         {
