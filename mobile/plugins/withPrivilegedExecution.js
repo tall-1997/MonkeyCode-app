@@ -6,19 +6,16 @@ function withPrivilegedExecution(config) {
   config = withAndroidManifest(config, (config) => {
     const manifest = config.modResults.manifest;
 
-    // 确保权限声明
+    // 确保权限声明（与 app.json 中已声明的权限去重）
+    // app.json 已含：SYSTEM_ALERT_WINDOW, FOREGROUND_SERVICE,
+    // FOREGROUND_SERVICE_SPECIAL_USE, POST_NOTIFICATIONS, QUERY_ALL_PACKAGES
     const permissions = [
-      'android.permission.SYSTEM_ALERT_WINDOW',
       'android.permission.READ_SMS',
       'android.permission.READ_CALENDAR',
       'android.permission.READ_CONTACTS',
       'android.permission.ACCESS_FINE_LOCATION',
       'android.permission.ACCESS_COARSE_LOCATION',
       'android.permission.PACKAGE_USAGE_STATS',
-      'android.permission.QUERY_ALL_PACKAGES',
-      'android.permission.FOREGROUND_SERVICE',
-      'android.permission.FOREGROUND_SERVICE_SPECIAL_USE',
-      'android.permission.POST_NOTIFICATIONS',
       'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
       'android.permission.BIND_ACCESSIBILITY_SERVICE',
       'android.permission.BIND_VOICE_INTERACTION',
