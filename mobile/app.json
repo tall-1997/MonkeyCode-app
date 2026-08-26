@@ -38,7 +38,7 @@
     "android": {
       "package": "com.chaitin.baizhi.monkeycode",
       "versionCode": 1,
-      "reactNativeArchitectures": ["arm64-v8a", "armeabi-v7a"],
+      "reactNativeArchitectures": ["arm64-v8a"],
       "permissions": [
         "RECORD_AUDIO",
         "SYSTEM_ALERT_WINDOW",

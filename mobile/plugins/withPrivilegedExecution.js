@@ -110,6 +110,9 @@ function withPrivilegedExecution(config) {
     // 确保 accessibility 描述字符串存在
     ensureStringResource(androidDir);
 
+    // 优化 Gradle 构建配置（内存/并发），避免 CI 上 NDK 并行编译卡死
+    tuneGradleProperties(androidDir);
+
     // 注册 MonkeyCodePackage 到 MainApplication
     registerPackage(projectRoot);
 
@@ -142,6 +145,30 @@ function addIntentFilter(actionName) {
 
 function addMetaData(name, resource) {
   return { $: { 'android:name': name, 'android:resource': resource } };
+}
+
+function tuneGradleProperties(androidDir) {
+  const propsFile = path.join(androidDir, 'gradle.properties');
+  if (!fs.existsSync(propsFile)) return;
+
+  let content = fs.readFileSync(propsFile, 'utf8');
+
+  // 提升 Gradle JVM 内存（runner 7GB，分配 4GB）
+  if (content.includes('-Xmx2048m')) {
+    content = content.replace(
+      'org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m',
+      'org.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=1024m'
+    );
+  } else if (!content.includes('-Xmx')) {
+    content = 'org.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=1024m\n' + content;
+  }
+
+  // 限制 Gradle 并行 worker 数，避免 2 核 runner 上 NDK 编译资源争抢
+  if (!content.includes('org.gradle.workers.max')) {
+    content += '\norg.gradle.workers.max=2\n';
+  }
+
+  fs.writeFileSync(propsFile, content);
 }
 
 function ensureStringResource(androidDir) {
