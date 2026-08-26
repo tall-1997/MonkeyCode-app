@@ -133,6 +133,9 @@ function withPrivilegedExecution(config) {
     // 确保 accessibility 描述字符串存在
     ensureStringResource(androidDir);
 
+    // 注册 MonkeyCodePackage 到 MainApplication
+    registerPackage(projectRoot);
+
     return config;
   }]);
 
@@ -152,6 +155,45 @@ function ensureStringResource(androidDir) {
     );
     fs.writeFileSync(stringsFile, content);
   }
+}
+
+function registerPackage(projectRoot) {
+  const androidDir = path.join(projectRoot, 'android');
+  const mainAppPath = findMainApplication(androidDir);
+  if (!mainAppPath) return;
+
+  let content = fs.readFileSync(mainAppPath, 'utf8');
+  const addStatement = 'add(com.monkeycode.privileged.MonkeyCodePackage())';
+  if (content.includes(addStatement)) return;
+
+  // 在 packageList 的 apply 块内追加注册（使用全限定名避免 import 冲突）
+  const applyAnchor = 'PackageList(this).packages.apply {';
+  if (content.includes(applyAnchor)) {
+    const idx = content.indexOf(applyAnchor) + applyAnchor.length;
+    content =
+      content.slice(0, idx) +
+      '\n          add(com.monkeycode.privileged.MonkeyCodePackage())' +
+      content.slice(idx);
+    fs.writeFileSync(mainAppPath, content);
+  }
+}
+
+function findMainApplication(androidDir) {
+  const javaDir = path.join(androidDir, 'app', 'src', 'main', 'java');
+  if (!fs.existsSync(javaDir)) return null;
+  const matches = [];
+  (function walk(dir) {
+    if (!fs.existsSync(dir)) return;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+      } else if (entry.name === 'MainApplication.kt' || entry.name === 'MainApplication.java') {
+        matches.push(full);
+      }
+    }
+  })(javaDir);
+  return matches[0] || null;
 }
 
 function asChild(parent, tag, attrs, children) {
