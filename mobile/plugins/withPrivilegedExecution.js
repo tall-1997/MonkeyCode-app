@@ -22,7 +22,8 @@ function withPrivilegedExecution(config) {
     ];
 
     for (const perm of permissions) {
-      asChild(manifest, 'uses-permission', { 'android:name': perm });
+      manifest['uses-permission'] = manifest['uses-permission'] || [];
+      manifest['uses-permission'].push({ $: { 'android:name': perm } });
     }
 
     // application 在 Expo manifest 结构中是数组，取第一个元素
@@ -31,61 +32,40 @@ function withPrivilegedExecution(config) {
       : manifest.application;
 
     // 注册 AccessibilityService
-    asChild(mainApplication, 'service', {
+    addService(mainApplication, {
       'android:name': 'com.monkeycode.privileged.MonkeyCodeAccessibilityService',
       'android:permission': 'android.permission.BIND_ACCESSIBILITY_SERVICE',
       'android:exported': 'true',
       'android:label': '@string/app_name',
-    }, {
-      'intent-filter': {
-        action: { 'android:name': 'android.accessibilityservice.AccessibilityService' },
-      },
-      'meta-data': {
-        'android:name': 'android.accessibilityservice',
-        'android:resource': '@xml/accessibility_service_config',
-      },
+      'intent-filter': addIntentFilter('android.accessibilityservice.AccessibilityService'),
+      'meta-data': addMetaData('android.accessibilityservice', '@xml/accessibility_service_config'),
     });
 
     // 注册 VoiceInteractionService
-    asChild(mainApplication, 'service', {
+    addService(mainApplication, {
       'android:name': 'com.monkeycode.privileged.MonkeyCodeVoiceInteractionService',
       'android:permission': 'android.permission.BIND_VOICE_INTERACTION',
       'android:exported': 'true',
       'android:label': '@string/app_name',
-    }, {
-      'intent-filter': {
-        action: { 'android:name': 'android.service.voice.VoiceInteractionService' },
-      },
-      'meta-data': {
-        'android:name': 'android.voice_interaction',
-        'android:resource': '@xml/voice_interaction_service_config',
-      },
+      'intent-filter': addIntentFilter('android.service.voice.VoiceInteractionService'),
+      'meta-data': addMetaData('android.voice_interaction', '@xml/voice_interaction_service_config'),
     });
 
     // 注册 VoiceInteractionSessionService
-    asChild(mainApplication, 'service', {
+    addService(mainApplication, {
       'android:name': 'com.monkeycode.privileged.MonkeyCodeVoiceInteractionSessionService',
       'android:permission': 'android.permission.BIND_VOICE_INTERACTION',
       'android:exported': 'true',
-    }, {
-      'intent-filter': {
-        action: { 'android:name': 'android.service.voice.VoiceInteractionSessionService' },
-      },
+      'intent-filter': addIntentFilter('android.service.voice.VoiceInteractionSessionService'),
     });
 
     // 注册 RecognitionService
-    asChild(mainApplication, 'service', {
+    addService(mainApplication, {
       'android:name': 'com.monkeycode.privileged.MonkeyCodeRecognitionService',
       'android:permission': 'android.permission.BIND_RECOGNITION_SERVICE',
       'android:exported': 'true',
-    }, {
-      'intent-filter': {
-        action: { 'android:name': 'android.speech.RecognitionService' },
-      },
-      'meta-data': {
-        'android:name': 'android.speech.recognition',
-        'android:resource': '@xml/recognition_service_config',
-      },
+      'intent-filter': addIntentFilter('android.speech.RecognitionService'),
+      'meta-data': addMetaData('android.speech.recognition', '@xml/recognition_service_config'),
     });
 
     return config;
@@ -137,6 +117,31 @@ function withPrivilegedExecution(config) {
   }]);
 
   return config;
+}
+
+function addService(application, service) {
+  const services = application['service'] || (application['service'] = []);
+  const svc = { $: {} };
+  for (const [k, v] of Object.entries(service)) {
+    if (k === 'intent-filter' || k === 'meta-data') {
+      const arr = Array.isArray(v) ? v : [v];
+      svc[k] = arr;
+    } else {
+      svc.$[k] = v;
+    }
+  }
+  services.push(svc);
+}
+
+function addIntentFilter(actionName) {
+  return {
+    $: {},
+    action: [{ $: { 'android:name': actionName } }],
+  };
+}
+
+function addMetaData(name, resource) {
+  return { $: { 'android:name': name, 'android:resource': resource } };
 }
 
 function ensureStringResource(androidDir) {
@@ -191,24 +196,6 @@ function findMainApplication(androidDir) {
     }
   })(javaDir);
   return matches[0] || null;
-}
-
-function asChild(parent, tag, attrs, children) {
-  if (!parent[tag]) {
-    parent[tag] = [];
-  }
-  const child = { $: attrs };
-  if (children) {
-    for (const [key, value] of Object.entries(children)) {
-      if (Array.isArray(value)) {
-        child[key] = value.map((v) => ({ $: v }));
-      } else {
-        child[key] = [value];
-      }
-    }
-  }
-  parent[tag].push(child);
-  return child;
 }
 
 module.exports = withPrivilegedExecution;
