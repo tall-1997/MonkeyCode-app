@@ -1,0 +1,87 @@
+name: Service Images
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+env:
+  NODE_VERSION: "20"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "pnpm"
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Test online preview configuration
+        working-directory: frontend
+        run: pnpm run test:online-preview
+
+      - name: Build
+        working-directory: frontend
+        run: pnpm run build:online
+
+      - name: Upload dist
+        run: |
+          mkdir -p _build/dist && cp -r frontend/dist/* _build/dist/
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: _build/dist/
+
+  docker:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: frontend/docker/dist
+
+      - name: Prepare docker context
+        run: |
+          [ -f frontend/docker/dist/index.html ] || (echo "Artifact structure:" && find . -maxdepth 4 -type d && exit 1)
+          ls -la frontend/docker/dist/ | head -25
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend/docker
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/monkeycode-frontend:${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/monkeycode-frontend:latest
+          platforms: linux/amd64

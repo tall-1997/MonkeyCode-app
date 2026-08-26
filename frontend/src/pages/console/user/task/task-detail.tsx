@@ -1,0 +1,1813 @@
+import { ConstsOwnerType, ConstsTaskStatus, type DomainModel, type DomainProjectTask, type DomainVMPort } from "@/api/Api"
+import { useAppRuntime } from "@/components/app-runtime-provider"
+import { useBreadcrumbTask } from "@/components/console/breadcrumb-task-context"
+import { useCommonData } from "@/components/console/data-provider"
+import { PlanStepsBlock } from "@/components/console/task/chat-panel"
+import { TaskChatInputBox, type TaskChatInputBoxHandle } from "@/components/console/task/chat-inputbox"
+import { TaskControlClient } from "@/components/console/task/task-control-client"
+import { TaskMessageHandler, type TaskMessageHandlerStatus } from "@/components/console/task/task-message-handler"
+import type { MessageType } from "@/components/console/task/message"
+import { TaskMessageVirtualList, type TaskMessageVirtualListHandle, type TaskMessageVirtualListScrollOptions } from "@/components/console/task/task-message-virtual-list"
+import { TaskPreparingView, useShouldShowPreparing } from "@/components/console/task/task-preparing-dialog"
+import { TaskFileExplorer, type TaskFileExplorerHandle } from "@/components/console/task/task-file-explorer"
+import { TaskPreviewPanel } from "@/components/console/task/task-preview-panel"
+import type { AvailableCommands, TaskPlan, TaskStreamStatus, TaskUserInput } from "@/components/console/task/task-shared"
+import { TaskStreamClient, type TaskStreamClientState, type TaskStreamCloseReason, type TaskStreamConnectionState } from "@/components/console/task/task-stream-client"
+import { TaskTerminalPanel } from "@/components/console/task/task-terminal-panel"
+import { TaskSkillsUpdateDialog } from "@/components/console/task/task-skills-update-dialog"
+import { TaskUserInputIndex } from "@/components/console/task/task-user-input-index"
+import { IS_OFFLINE_EDITION } from "@/utils/edition"
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { useDialogActionNavigation } from "@/components/ui/dialog-action-navigation"
+import { CircularProgress } from "@/components/ui/circular-progress"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable"
+import { ScrollArea } from "@/components/ui/scroll-area"
+import { Spinner } from "@/components/ui/spinner"
+import Icon from "@/components/common/Icon"
+import { useIsMobile } from "@/hooks/use-mobile"
+import { cn } from "@/lib/utils"
+import { canUseModelBySubscription, formatTokens, getBrandFromModel, getBuiltinModelName, getModelDisplayName, getOwnerTypeBadge, getTaskDisplayName, isBuiltinPublicModelPackage, stripBuiltinPublicModelPackagePrefix } from "@/utils/common"
+import { apiRequest } from "@/utils/requestUtils"
+import { IconChevronDown, IconDeviceDesktop, IconDots, IconFile, IconPuzzle, IconReload, IconTerminal2, IconUpload } from "@tabler/icons-react"
+import React from "react"
+import { useParams } from "react-router-dom"
+import { toast } from "sonner"
+import { useTranslation } from "react-i18next"
+
+type SidePanelType = "files"
+type MobileToolsView = "tools" | "files"
+type AskUserQuestionStatus = "pending" | "queued" | "submitting" | "completed" | "expired"
+
+const BUILTIN_TASK_MODEL_OPTIONS = [
+  { model: "monkeycode-basic", labelKey: "basic", badgeKey: "basicBadge", badgeVariant: "default" as const, iconName: "gift" },
+  { model: "monkeycode-pro", labelKey: "pro", badgeKey: "proBadge", badgeVariant: "secondary" as const, iconName: "vip-1" },
+  { model: "monkeycode-ultra", labelKey: "ultra", badgeKey: "ultraBadge", badgeVariant: "secondary" as const, iconName: "vip-2" },
+] as const
+type BuiltinTaskModelName = typeof BUILTIN_TASK_MODEL_OPTIONS[number]["model"]
+const OPEN_WALLET_DIALOG_EVENT = "open-wallet-dialog"
+type MessageSource = "live" | "history"
+const MODEL_SWITCH_MIN_CREATED_AT = 1777381200 // 2026-04-28 21:00:00 +08:00
+
+export default function TaskDetailPage() {
+  const { taskId } = useParams()
+  const { setTaskName } = useBreadcrumbTask() ?? {}
+  const { serverConfig } = useAppRuntime()
+  const { models, loadingModels, subscription } = useCommonData()
+  const { t } = useTranslation()
+  const isMobile = useIsMobile()
+  const [task, setTask] = React.useState<DomainProjectTask | null>(null)
+  const [activeSidePanel, setActiveSidePanel] = React.useState<SidePanelType | null>(null)
+  const [terminalPanelOpen, setTerminalPanelOpen] = React.useState(false)
+  const [previewDialogOpen, setPreviewDialogOpen] = React.useState(false)
+  const [streamStatus, setStreamStatus] = React.useState<TaskMessageHandlerStatus>("inited")
+  const [availableCommands, setAvailableCommands] = React.useState<AvailableCommands | null>(null)
+  const [plan, setPlan] = React.useState<TaskPlan>({
+    entries: [],
+    version: 0,
+  })
+  const [contextUsage, setContextUsage] = React.useState<{ size: number | null; used: number | null }>({
+    size: null,
+    used: null,
+  })
+  const [sending, setSending] = React.useState(false)
+  const [rawHistoryMessages, setRawHistoryMessages] = React.useState<MessageType[]>([])
+  const [rawLiveMessages, setRawLiveMessages] = React.useState<MessageType[]>([])
+  const [streamConnectionState, setStreamConnectionState] = React.useState<TaskStreamConnectionState>("closed")
+  const [streamCloseReason, setStreamCloseReason] = React.useState<TaskStreamCloseReason | null>(null)
+  const [queuedReplyIds, setQueuedReplyIds] = React.useState<string[]>([])
+  const [submittingReplyIds, setSubmittingReplyIds] = React.useState<string[]>([])
+  const [fileChangesCount, setFileChangesCount] = React.useState(0)
+  const [fileRefreshSignal, setFileRefreshSignal] = React.useState(0)
+  const [historyCursor, setHistoryCursor] = React.useState<string | null>(null)
+  const historyCursorRef = React.useRef<string | null>(null)
+  const [historyHasMore, setHistoryHasMore] = React.useState(true)
+  const [historyLoaded, setHistoryLoaded] = React.useState(false)
+  const [historyLoading, setHistoryLoading] = React.useState(false)
+  const [historyCursorReady, setHistoryCursorReady] = React.useState(false)
+  const [previewPorts, setPreviewPorts] = React.useState<DomainVMPort[] | undefined>(undefined)
+  const [contextUsagePopoverOpen, setContextUsagePopoverOpen] = React.useState(false)
+  const [openModelGroupKey, setOpenModelGroupKey] = React.useState<string>()
+  const [resetContextDialogOpen, setResetContextDialogOpen] = React.useState(false)
+  const [resetContextSubmitting, setResetContextSubmitting] = React.useState(false)
+  const [restartAgentDialogOpen, setRestartAgentDialogOpen] = React.useState(false)
+  const [restartAgentSubmitting, setRestartAgentSubmitting] = React.useState(false)
+  const [restartAgentClearContext, setRestartAgentClearContext] = React.useState(false)
+  const [publishConfirmDialogOpen, setPublishConfirmDialogOpen] = React.useState(false)
+  const [skillsDialogOpen, setSkillsDialogOpen] = React.useState(false)
+  const [mobileToolsOpen, setMobileToolsOpen] = React.useState(false)
+  const [mobileToolsView, setMobileToolsView] = React.useState<MobileToolsView>("tools")
+  const [chatAtBottom, setChatAtBottom] = React.useState(true)
+  const [modelSwitchDialogOpen, setModelSwitchDialogOpen] = React.useState(false)
+  const [modelSwitchSubmitting, setModelSwitchSubmitting] = React.useState(false)
+  const [pendingSwitchModel, setPendingSwitchModel] = React.useState<DomainModel | null>(null)
+  const [pendingWorkspaceFilePath, setPendingWorkspaceFilePath] = React.useState<string | null>(null)
+  const taskControlClientRef = React.useRef<TaskControlClient | null>(null)
+  const streamClientRef = React.useRef<TaskStreamClient | null>(null)
+  const historyLoadingRef = React.useRef(false)
+  const chatScrollRootRef = React.useRef<HTMLDivElement | null>(null)
+  const historyLoadedRef = React.useRef(false)
+  const chatScrollRef = React.useRef<HTMLDivElement | null>(null)
+  const chatInputRef = React.useRef<TaskChatInputBoxHandle>(null)
+  const modelSwitchDialogNavigation = useDialogActionNavigation()
+  const resetContextDialogNavigation = useDialogActionNavigation()
+  const restartAgentDialogNavigation = useDialogActionNavigation()
+  const publishWebsiteDialogNavigation = useDialogActionNavigation()
+  const chatContentRef = React.useRef<HTMLDivElement | null>(null)
+  const taskMessageListRef = React.useRef<TaskMessageVirtualListHandle | null>(null)
+  const taskFileExplorerRef = React.useRef<TaskFileExplorerHandle | null>(null)
+  const autoScrollFrameRef = React.useRef<number | null>(null)
+  const autoScrollLockTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+  const autoScrollIntentLockedRef = React.useRef(false)
+  const shouldAutoScrollChatRef = React.useRef(true)
+  const previousLiveUserInputIdRef = React.useRef<string | null>(null)
+  const previousLiveEndedCycleIdRef = React.useRef<string | null>(null)
+  const previousRunningMessagesSignatureRef = React.useRef<string | null>(null)
+  const pendingMobileToolActionRef = React.useRef<(() => void) | null>(null)
+  const activeSidePanelRef = React.useRef<SidePanelType | null>(null)
+  const previewDialogOpenRef = React.useRef(false)
+  const showPreparing = useShouldShowPreparing(task)
+  const taskInteractive = task?.status === ConstsTaskStatus.TaskStatusProcessing
+  const canPublishWebsite = !IS_OFFLINE_EDITION
+  const envid = task?.virtualmachine?.id
+  const cancelledRef = React.useRef(false)
+  const timeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+  const queuedReplyIdSet = React.useMemo(() => new Set(queuedReplyIds), [queuedReplyIds])
+  const submittingReplyIdSet = React.useMemo(() => new Set(submittingReplyIds), [submittingReplyIds])
+  const decorateMessages = React.useCallback((sourceMessages: MessageType[], source: MessageSource) => {
+    return sourceMessages.map((message) => {
+      if (message.type !== "ask_user_question") {
+        return message
+      }
+
+      const askId = message.data.askId ?? ""
+      const baseStatus = message.data.status
+      const isCompleted = baseStatus === "completed"
+      const isExpired = baseStatus === "failed" || baseStatus === "expired"
+
+      let nextStatus: AskUserQuestionStatus = isCompleted ? "completed" : isExpired ? "expired" : "pending"
+      if (!isCompleted && !isExpired) {
+        if (source === "history" || streamConnectionState === "closed") {
+          nextStatus = "expired"
+        } else if (queuedReplyIdSet.has(askId)) {
+          nextStatus = "queued"
+        } else if (submittingReplyIdSet.has(askId)) {
+          nextStatus = "submitting"
+        }
+      }
+
+      return {
+        ...message,
+        data: {
+          ...message.data,
+          status: nextStatus,
+        },
+        onResponseAskUserQuestion: source === "live" && nextStatus === "pending"
+          ? (nextAskId: string, answers: unknown) => {
+            if (!nextAskId) {
+              return "rejected"
+            }
+
+            const streamClient = streamClientRef.current
+            if (!streamClient) {
+              toast.error(t("taskDetail.page.askUser.connectionUnavailable"))
+              return "rejected"
+            }
+
+            const result = streamClient.sendReplyQuestion(nextAskId, answers)
+            if (result === "rejected") {
+              toast.error(t("taskDetail.page.askUser.connectionClosed"))
+            }
+            return result
+          }
+          : undefined,
+      }
+    })
+  }, [queuedReplyIdSet, streamConnectionState, submittingReplyIdSet, t])
+  const historyMessages = React.useMemo(() => decorateMessages(rawHistoryMessages, "history"), [decorateMessages, rawHistoryMessages])
+  const liveMessages = React.useMemo(() => decorateMessages(rawLiveMessages, "live"), [decorateMessages, rawLiveMessages])
+  const handleReloadSession = React.useCallback(async () => {
+    const success = await taskControlClientRef.current?.restart(true)
+    return !!success
+  }, [])
+  const runningMessagesSignature = React.useMemo(() => JSON.stringify(
+    liveMessages
+      .filter((message) => (
+        message.type === "agent_message_chunk"
+        || message.type === "agent_thought_chunk"
+        || message.type === "tool_call"
+        || message.type === "ask_user_question"
+      ))
+      .map((message) => ({
+        id: message.id,
+        type: message.type,
+        content: message.data.content ?? null,
+        status: message.data.status ?? null,
+        title: message.data.title ?? null,
+        askId: message.data.askId ?? null,
+        toolCallId: message.data.toolCallId ?? null,
+        questions: message.data.questions ?? null,
+      })),
+  ), [liveMessages])
+  const latestLiveUserInputId = React.useMemo(() => {
+    for (let index = liveMessages.length - 1; index >= 0; index -= 1) {
+      const message = liveMessages[index]
+      if (message.type === "user_input") {
+        return message.id
+      }
+    }
+    return null
+  }, [liveMessages])
+  const latestCompletedLiveCycleId = React.useMemo(() => {
+    if (!latestLiveUserInputId) {
+      return null
+    }
+    if (streamStatus === "finished" || streamCloseReason === "task_ended") {
+      return latestLiveUserInputId
+    }
+    return null
+  }, [latestLiveUserInputId, streamCloseReason, streamStatus])
+  const [timeCost, setTimeCost] = React.useState(0)
+  const previewPortCount = (previewPorts ?? []).length
+  const totalTokens = task?.stats?.total_tokens ?? ((task?.stats?.input_tokens ?? 0) + (task?.stats?.output_tokens ?? 0))
+  const hasContextUsage = contextUsage.size !== null || contextUsage.used !== null
+  const canInput = taskInteractive && !sending && streamStatus !== "connected" && streamStatus !== "inited"
+  const canSwitchModel = canInput && (task?.created_at ? task.created_at >= MODEL_SWITCH_MIN_CREATED_AT : true)
+  const planStreamStatus: TaskStreamStatus = streamStatus === "connected" ? "executing" : streamStatus
+  const contextProgress = contextUsage.size && contextUsage.size > 0
+    ? Math.min(Math.max((contextUsage.used ?? 0) / contextUsage.size, 0), 1)
+    : 0
+  const contextProgressClassName = contextProgress >= 0.8
+    ? "text-danger"
+    : contextProgress >= 0.6
+      ? "text-warning"
+      : "text-foreground"
+  const contextUsagePercent = `${(contextProgress * 100).toFixed(1)}%`
+
+  const hasSidePanel = !isMobile && activeSidePanel !== null
+  const hasBottomTerminal = terminalPanelOpen
+  const currentModelId = task?.model?.id ?? ""
+  const currentModelName = task?.model?.model ?? ""
+  const currentModel = task?.model
+  const builtinTaskModelOptions = React.useMemo(() => [
+    {
+      ...BUILTIN_TASK_MODEL_OPTIONS[0],
+      label: t("taskDetail.page.models.basic"),
+      badge: t("taskDetail.page.models.basicBadge"),
+    },
+    {
+      ...BUILTIN_TASK_MODEL_OPTIONS[1],
+      label: t("taskDetail.page.models.pro"),
+      badge: t("taskDetail.page.models.proBadge"),
+    },
+    {
+      ...BUILTIN_TASK_MODEL_OPTIONS[2],
+      label: t("taskDetail.page.models.ultra"),
+      badge: t("taskDetail.page.models.ultraBadge"),
+    },
+  ], [t])
+  const supportedModels = React.useMemo(
+    () => models.filter((model) => model.id || model.model),
+    [models]
+  )
+  const recommendedModelKeys = React.useMemo(() => {
+    return BUILTIN_TASK_MODEL_OPTIONS.reduce((recommended, option) => {
+      const recommendedModel = supportedModels
+        .filter((model) => getBuiltinModelName(model.model) === option.model)
+        .sort((left, right) => {
+          const weightDiff = (right.weight || 0) - (left.weight || 0)
+          if (weightDiff !== 0) {
+            return weightDiff
+          }
+
+          const nameDiff = (left.model || "").localeCompare(right.model || "")
+          if (nameDiff !== 0) {
+            return nameDiff
+          }
+
+          return (left.id || "").localeCompare(right.id || "")
+        })[0]
+
+      const recommendedKey = recommendedModel?.id || recommendedModel?.model
+      if (recommendedKey) {
+        recommended[option.model] = recommendedKey
+      }
+
+      return recommended
+    }, {} as Partial<Record<BuiltinTaskModelName, string>>)
+  }, [supportedModels])
+  const modelGroups = React.useMemo(() => {
+    const builtinModelGroups = IS_OFFLINE_EDITION
+      ? []
+      : builtinTaskModelOptions.map((option) => ({
+        key: option.model,
+        label: option.label,
+        badge: option.badge,
+        badgeVariant: option.badgeVariant,
+        iconName: option.iconName,
+        models: supportedModels.filter((model) => getBuiltinModelName(model.model) === option.model),
+      }))
+    const privateModels = supportedModels.filter((model) => (
+      model.owner?.type === ConstsOwnerType.OwnerTypePrivate
+      && !getBuiltinModelName(model.model)
+    ))
+    const paidModels = supportedModels.filter((model) => (
+      model.owner?.type === ConstsOwnerType.OwnerTypePublic
+      && !isBuiltinPublicModelPackage(model.model)
+    ))
+    const teamModelGroups = Array.from(
+      supportedModels
+        .filter((model) => (
+          model.owner?.type === ConstsOwnerType.OwnerTypeTeam
+          && !getBuiltinModelName(model.model)
+        ))
+        .reduce((groups, model) => {
+          const teamName = model.owner?.name || t("taskDetail.page.models.team")
+          const teamId = model.owner?.id || teamName
+          const groupKey = `${teamId}:${teamName}`
+          const group = groups.get(groupKey) || { key: groupKey, label: teamName, iconName: "team", models: [] as DomainModel[] }
+          group.models.push(model)
+          groups.set(groupKey, group)
+          return groups
+        }, new Map<string, { key: string; label: string; iconName: string; models: DomainModel[] }>())
+        .values()
+    )
+
+    return [
+      ...builtinModelGroups,
+      {
+        key: "paid-models",
+        label: t("taskDetail.page.models.paid"),
+        badge: t("taskDetail.page.models.paidBadge"),
+        iconName: "qiandaizi",
+        models: paidModels,
+      },
+      {
+        key: "private-models",
+        label: t("taskDetail.page.models.private"),
+        iconName: "a-AIshezhi",
+        models: privateModels,
+      },
+      ...teamModelGroups,
+    ].filter((group) => group.models.length > 0)
+  }, [builtinTaskModelOptions, supportedModels, t])
+
+  const toggleSidePanel = (panel: SidePanelType) => {
+    setActiveSidePanel((prev) => (prev === panel ? null : panel))
+  }
+
+  const toggleTerminalPanel = () => {
+    setTerminalPanelOpen((prev) => !prev)
+  }
+
+  const togglePreviewDialog = () => {
+    setPreviewDialogOpen((prev) => !prev)
+  }
+
+  React.useEffect(() => {
+    activeSidePanelRef.current = activeSidePanel
+  }, [activeSidePanel])
+
+  React.useEffect(() => {
+    previewDialogOpenRef.current = previewDialogOpen
+  }, [previewDialogOpen])
+
+  React.useEffect(() => {
+    if (!isMobile) {
+      setMobileToolsView("tools")
+      setMobileToolsOpen(false)
+    }
+  }, [isMobile])
+
+  const disconnectStreamClient = React.useCallback(() => {
+    const state = streamClientRef.current?.disconnect() ?? null
+    streamClientRef.current = null
+    return state
+  }, [])
+
+  const disposeTaskControlClient = React.useCallback(() => {
+    taskControlClientRef.current?.dispose()
+    taskControlClientRef.current = null
+  }, [])
+
+  const connectStreamClient = React.useCallback((mode: "attach" | "new", userInput?: TaskUserInput) => {
+    if (!taskId) return Promise.resolve(false)
+
+    return new Promise<boolean>((resolve) => {
+      let settled = false
+      const finish = (result: boolean) => {
+        if (settled) return
+        settled = true
+        resolve(result)
+      }
+
+      const previousState = disconnectStreamClient()
+      const previousMessages = previousState?.messages ?? rawLiveMessages
+      if (mode === "new" && previousMessages.length > 0) {
+        setRawHistoryMessages((prev) => [...prev, ...previousMessages])
+        setRawLiveMessages([])
+      }
+
+      setAvailableCommands(null)
+      setPlan({
+        entries: [],
+        version: 0,
+      })
+      setStreamStatus("inited")
+      setStreamConnectionState("connecting")
+      setStreamCloseReason(null)
+      setQueuedReplyIds([])
+      setSubmittingReplyIds([])
+      setSending(mode === "new")
+      setTimeCost(0)
+
+      const client = mode === "attach"
+        ? TaskStreamClient.attach({
+          taskId,
+          onStateChange: (state: TaskStreamClientState) => {
+            if (streamClientRef.current !== client || cancelledRef.current) return
+            setStreamStatus(state.status)
+            setRawLiveMessages(state.messages)
+            setAvailableCommands(state.availableCommands)
+            setPlan(state.plan)
+            setContextUsage((prev) => ({
+              size: state.contextUsage.size ?? prev.size,
+              used: state.contextUsage.used ?? prev.used,
+            }))
+            setTimeCost(state.executionTimeMs)
+            setStreamConnectionState(state.connectionState)
+            setStreamCloseReason(state.closeReason)
+            setQueuedReplyIds(state.queuedReplyIds)
+            setSubmittingReplyIds(state.submittingReplyIds)
+            if (!historyLoadedRef.current && state.historyCursor.ready) {
+              setHistoryCursorReady(true)
+              setHistoryCursor(state.historyCursor.cursor)
+              historyCursorRef.current = state.historyCursor.cursor
+              setHistoryHasMore(state.historyCursor.hasMore)
+            }
+          },
+          onOpen: () => {
+            if (streamClientRef.current !== client || cancelledRef.current) return
+            setSending(false)
+            finish(true)
+          },
+          onClose: () => {
+            if (streamClientRef.current === client) {
+              streamClientRef.current = null
+            }
+            if (!cancelledRef.current) {
+              setSending(false)
+            }
+            finish(false)
+          },
+          onError: () => {
+            if (streamClientRef.current !== client || cancelledRef.current) return
+            setSending(false)
+            finish(false)
+          },
+        })
+        : TaskStreamClient.new({
+          taskId,
+          onStateChange: (state: TaskStreamClientState) => {
+            if (streamClientRef.current !== client || cancelledRef.current) return
+            setStreamStatus(state.status)
+            setRawLiveMessages(state.messages)
+            setAvailableCommands(state.availableCommands)
+            setPlan(state.plan)
+            setContextUsage((prev) => ({
+              size: state.contextUsage.size ?? prev.size,
+              used: state.contextUsage.used ?? prev.used,
+            }))
+            setTimeCost(state.executionTimeMs)
+            setStreamConnectionState(state.connectionState)
+            setStreamCloseReason(state.closeReason)
+            setQueuedReplyIds(state.queuedReplyIds)
+            setSubmittingReplyIds(state.submittingReplyIds)
+          },
+          onOpen: () => {
+            if (streamClientRef.current !== client || cancelledRef.current) return
+            setSending(false)
+            finish(true)
+          },
+          onClose: () => {
+            if (streamClientRef.current === client) {
+              streamClientRef.current = null
+            }
+            if (!cancelledRef.current) {
+              setSending(false)
+            }
+            finish(false)
+          },
+          onError: () => {
+            if (streamClientRef.current !== client || cancelledRef.current) return
+            setSending(false)
+            finish(false)
+          },
+          userInput: userInput ?? "",
+        })
+
+      streamClientRef.current = client
+      client.connect()
+    })
+  }, [disconnectStreamClient, rawLiveMessages, taskId])
+
+  React.useEffect(() => {
+    if (!taskId) return
+    disconnectStreamClient()
+    disposeTaskControlClient()
+    setTask(null)
+    setActiveSidePanel(null)
+    setTerminalPanelOpen(false)
+    setPreviewDialogOpen(false)
+    setStreamStatus("inited")
+    setAvailableCommands(null)
+    setPlan({
+      entries: [],
+      version: 0,
+    })
+    setSending(false)
+    setRawHistoryMessages([])
+    setRawLiveMessages([])
+    setStreamConnectionState("closed")
+    setQueuedReplyIds([])
+    setSubmittingReplyIds([])
+    setFileChangesCount(0)
+    setFileRefreshSignal(0)
+    setHistoryCursor(null)
+    historyCursorRef.current = null
+    setHistoryHasMore(true)
+    setHistoryLoaded(false)
+    setHistoryCursorReady(false)
+    historyLoadedRef.current = false
+    setHistoryLoading(false)
+    setPreviewPorts(undefined)
+    setTimeCost(0)
+    historyLoadingRef.current = false
+  }, [disconnectStreamClient, disposeTaskControlClient, taskId])
+
+  const fetchTaskDetail = React.useCallback(async (): Promise<DomainProjectTask | null> => {
+    if (!taskId) return null
+    let result: DomainProjectTask | null = null
+    await apiRequest("v1UsersTasksDetail", {}, [taskId], (resp) => {
+      if (resp.code === 0) {
+        result = resp.data
+        if (!cancelledRef.current) setTask(resp.data)
+      } else {
+        toast.error(resp.message || t("taskDetail.page.toast.fetchTaskFailed"))
+      }
+    })
+    return result
+  }, [taskId, t])
+
+  const syncFileChangesCount = React.useCallback(async () => {
+    const changes = await taskControlClientRef.current?.getFileChanges()
+    if (cancelledRef.current || changes === null || changes === undefined) return
+    setFileChangesCount(changes.length)
+  }, [])
+
+  const applyRepoFileChange = React.useCallback(() => {
+    if (cancelledRef.current) return
+    setFileRefreshSignal((prev) => prev + 1)
+    void syncFileChangesCount()
+  }, [syncFileChangesCount])
+
+  const fetchPortForwards = React.useCallback(async () => {
+    const ports = await taskControlClientRef.current?.getPortForwardList()
+    if (cancelledRef.current || ports === null || ports === undefined) return
+
+    setPreviewPorts(ports.map((port) => ({
+      port: port.port,
+      status: port.status as DomainVMPort["status"],
+      forward_id: port.forward_id ?? undefined,
+      preview_url: port.access_url ?? undefined,
+      error_message: port.error_message ?? undefined,
+      success: true,
+    })))
+  }, [])
+
+  const handlePortChange = React.useCallback(async (opened: boolean) => {
+    await fetchPortForwards()
+    if (!opened || cancelledRef.current) {
+      return
+    }
+
+    const currentPanel = activeSidePanelRef.current
+    const shouldOpenPreview = currentPanel === null || previewDialogOpenRef.current
+    if (!shouldOpenPreview) {
+      return
+    }
+
+    setPreviewDialogOpen(true)
+    await fetchPortForwards()
+  }, [fetchPortForwards])
+
+  React.useEffect(() => {
+    if (!taskId || !taskInteractive) return
+
+    const client = new TaskControlClient({
+      taskId,
+      onRepoFileChange: applyRepoFileChange,
+      onPortChange: handlePortChange,
+    })
+    taskControlClientRef.current = client
+    client.connect()
+
+    return () => {
+      if (taskControlClientRef.current === client) {
+        taskControlClientRef.current = null
+      }
+      client.dispose()
+    }
+  }, [applyRepoFileChange, handlePortChange, taskId, taskInteractive])
+
+  const scheduleFetchTaskDetail = React.useCallback(async () => {
+    const currentTask = await fetchTaskDetail()
+    if (cancelledRef.current) return
+    const taskStatus = currentTask?.status
+    let delay = 60000
+    if (taskStatus === ConstsTaskStatus.TaskStatusPending) {
+      delay = 2000
+    } else if (taskStatus === ConstsTaskStatus.TaskStatusProcessing) {
+      delay = 10000
+    }
+    timeoutRef.current = setTimeout(scheduleFetchTaskDetail, delay)
+  }, [fetchTaskDetail])
+
+  const fetchTaskRounds = React.useCallback(async (cursor?: string, limit?: number) => {
+    if (!taskId || historyLoadingRef.current) return
+    historyLoadingRef.current = true
+    setHistoryLoading(true)
+    await apiRequest(
+      "v1UsersTasksRoundsList",
+      {
+        id: taskId,
+        limit: limit ?? 1,
+        ...(cursor ? { cursor } : {}),
+      },
+      [],
+      (resp) => {
+        if (cancelledRef.current) return
+        if (resp.code === 0) {
+          const messageHandler = new TaskMessageHandler()
+          messageHandler.pushChunks(resp.data?.chunks ?? [])
+          const messageState = messageHandler.finalizeCycle()
+          setRawHistoryMessages((prev) => [...messageState.messages, ...prev])
+          setHistoryCursorReady(true)
+          {
+            const nextCursor = resp.data?.next_cursor ?? null
+            setHistoryCursor(nextCursor)
+            historyCursorRef.current = nextCursor
+          }
+          setHistoryHasMore(resp.data?.has_more ?? false)
+          setHistoryLoaded(true)
+          historyLoadedRef.current = true
+        } else {
+          toast.error(resp.message || t("taskDetail.rounds.loadFailed"))
+        }
+      },
+      () => undefined,
+    )
+    historyLoadingRef.current = false
+    if (!cancelledRef.current) {
+      setHistoryLoading(false)
+    }
+  }, [taskId, t])
+
+  React.useEffect(() => {
+    if (!taskId) return
+    cancelledRef.current = false
+    scheduleFetchTaskDetail()
+    return () => {
+      cancelledRef.current = true
+      disconnectStreamClient()
+      disposeTaskControlClient()
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current)
+        timeoutRef.current = null
+      }
+    }
+  }, [disconnectStreamClient, disposeTaskControlClient, taskId, scheduleFetchTaskDetail])
+
+  React.useEffect(() => {
+    if (!setTaskName) return
+    if (task) {
+      setTaskName(getTaskDisplayName(task, t("taskDetail.page.task.unknownName")))
+    }
+    return () => setTaskName?.(null)
+  }, [task, setTaskName, t])
+
+  React.useEffect(() => {
+    if (!taskId || !task) return
+    if (streamStatus !== "inited") return
+    if (streamClientRef.current) return
+    if (!taskInteractive) return
+    connectStreamClient("attach")
+  }, [connectStreamClient, streamStatus, task, taskId, taskInteractive])
+
+  React.useEffect(() => {
+    if (!task) return
+    if (historyLoaded || historyLoading) return
+    if (rawLiveMessages.length > 0) return
+    if (
+      task.status !== ConstsTaskStatus.TaskStatusFinished
+      && task.status !== ConstsTaskStatus.TaskStatusError
+    ) {
+      return
+    }
+    fetchTaskRounds()
+  }, [fetchTaskRounds, historyLoaded, historyLoading, rawLiveMessages.length, task])
+
+  React.useEffect(() => {
+    if (!taskInteractive || !previewDialogOpen) return
+    fetchPortForwards()
+  }, [fetchPortForwards, previewDialogOpen, taskInteractive])
+
+  const handleSend = React.useCallback((content: TaskUserInput) => {
+    if (!taskId) return Promise.resolve(false)
+    return connectStreamClient("new", content)
+  }, [connectStreamClient, taskId])
+  const messages = React.useMemo(() => {
+    const enhanceErrorMessage = (message: MessageType) => {
+      if (message.type !== "error_message") {
+        return message
+      }
+
+      return {
+        ...message,
+        onReloadSession: handleReloadSession,
+        onUserInput: handleSend,
+      }
+    }
+
+    return [...historyMessages, ...liveMessages].map(enhanceErrorMessage)
+  }, [handleReloadSession, handleSend, historyMessages, liveMessages])
+
+  const handleCompactContext = React.useCallback(() => {
+    if (!canInput) return
+    setContextUsagePopoverOpen(false)
+    handleSend("/compact")
+  }, [canInput, handleSend])
+
+  const handleRequestModelSwitch = React.useCallback((model: DomainModel) => {
+    if (!model.id) {
+      toast.error(t("taskDetail.page.toast.invalidModel"))
+      return
+    }
+
+    if (model.id === currentModelId || (!currentModelId && model.model === currentModelName)) {
+      return
+    }
+
+    setPendingSwitchModel(model)
+    setModelSwitchDialogOpen(true)
+  }, [currentModelId, currentModelName, t])
+
+  const handleOpenSubscriptionPlan = React.useCallback(() => {
+    window.dispatchEvent(new CustomEvent(OPEN_WALLET_DIALOG_EVENT, {
+      detail: { section: "plan" },
+    }))
+  }, [])
+
+  const getNestedModelDisplayName = React.useCallback((modelName?: string | null) => {
+    const normalizedModelName = modelName?.trim()
+    if (!normalizedModelName) {
+      return ""
+    }
+
+    const builtinModelName = getBuiltinModelName(normalizedModelName)
+    if (!builtinModelName) {
+      return getModelDisplayName(normalizedModelName)
+    }
+
+    const nestedModelName = normalizedModelName.slice(builtinModelName.length).replace(/^\/+/, "")
+    return nestedModelName || getModelDisplayName(normalizedModelName)
+  }, [])
+
+  const getModelOptionDisplayName = React.useCallback((model: DomainModel, nested = false) => {
+    const remark = model.remark?.trim()
+    if (remark) {
+      return stripBuiltinPublicModelPackagePrefix(remark)
+    }
+
+    return nested ? getNestedModelDisplayName(model.model) : getModelDisplayName(model.model)
+  }, [getNestedModelDisplayName])
+
+  const getCurrentModelDisplayName = React.useCallback(() => {
+    const builtinModelName = getBuiltinModelName(currentModelName)
+    const builtinOption = builtinTaskModelOptions.find((option) => option.model === builtinModelName)
+    if (builtinOption && currentModel) {
+      const nestedModelName = getModelOptionDisplayName(currentModel, true)
+      return isMobile ? nestedModelName : `${builtinOption.label} / ${nestedModelName}`
+    }
+
+    return currentModel ? getModelOptionDisplayName(currentModel) : getModelDisplayName(currentModelName)
+  }, [builtinTaskModelOptions, currentModel, currentModelName, getModelOptionDisplayName, isMobile])
+
+  const getRecommendedModelBadge = React.useCallback((model: DomainModel) => {
+    const builtinModelName = getBuiltinModelName(model.model)
+    if (!builtinModelName) {
+      return null
+    }
+
+    const modelKey = model.id || model.model
+    if (modelKey && recommendedModelKeys[builtinModelName] === modelKey) {
+      return t("taskDetail.page.models.recommended")
+    }
+
+    return null
+  }, [recommendedModelKeys, t])
+
+  const renderModelSwitchOption = React.useCallback((model: DomainModel, nested = false, indented = false) => {
+    const modelName = model.model || t("taskDetail.page.models.unknown")
+    const isSelected = model.id === currentModelId || (!currentModelId && model.model === currentModelName)
+    const canUseModel = canUseModelBySubscription(model, subscription)
+    const displayName = getModelOptionDisplayName(model, nested)
+    const recommendedBadge = getRecommendedModelBadge(model)
+
+    return (
+      <DropdownMenuRadioItem
+        key={model.id || modelName}
+        value={model.id || ""}
+        disabled={!model.id || !canUseModel}
+        onClick={(event) => {
+          if (!canUseModel) {
+            event.preventDefault()
+            handleOpenSubscriptionPlan()
+            return
+          }
+
+          handleRequestModelSwitch(model)
+        }}
+        className={cn(
+          "w-full justify-between gap-3 pr-2 [&>[data-slot=dropdown-menu-radio-item-indicator]]:hidden",
+          indented && "pl-7",
+          isSelected && "bg-primary/10 text-primary",
+        )}
+      >
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <Icon name={getBrandFromModel(model)} className="size-4" />
+          <span className="truncate">{displayName}</span>
+        </div>
+        <div className="ml-auto flex shrink-0 items-center justify-end gap-1.5">
+          {recommendedBadge ? (
+            <Badge variant="secondary" className="shrink-0">{recommendedBadge}</Badge>
+          ) : null}
+          {model.owner?.type !== ConstsOwnerType.OwnerTypePublic && getOwnerTypeBadge(model.owner)}
+        </div>
+      </DropdownMenuRadioItem>
+    )
+  }, [currentModelId, currentModelName, getModelOptionDisplayName, getRecommendedModelBadge, handleOpenSubscriptionPlan, handleRequestModelSwitch, subscription])
+
+  const renderModelSwitchGroupHeader = React.useCallback((group: { key: string; label: string; badge?: string; badgeVariant?: "default" | "secondary"; iconName?: string; models: DomainModel[] }) => (
+    <div key={group.key} className="flex min-w-0 items-center gap-2 px-2 py-1.5 text-xs font-medium text-muted-foreground">
+      {group.iconName ? (
+        <Icon name={group.iconName} className="size-4 shrink-0" />
+      ) : null}
+      <span className="truncate">{group.label}</span>
+      {group.badge ? (
+        <Badge
+          variant={group.badgeVariant || "secondary"}
+          className={cn("shrink-0", group.badgeVariant === "default" && "!text-primary-foreground")}
+        >
+          {group.badge}
+        </Badge>
+      ) : null}
+    </div>
+  ), [])
+
+  const renderModelSwitchGroup = React.useCallback((group: { key: string; label: string; badge?: string; badgeVariant?: "default" | "secondary"; iconName?: string; models: DomainModel[] }) => {
+    const hasAvailableModel = group.models.some((model) => model.id)
+
+    return (
+      <DropdownMenuSub
+        key={group.key}
+        open={openModelGroupKey === group.key}
+        onOpenChange={(open) => {
+          setOpenModelGroupKey((currentKey) => {
+            if (open) {
+              return group.key
+            }
+
+            return currentKey === group.key ? undefined : currentKey
+          })
+        }}
+      >
+        <DropdownMenuSubTrigger className="w-full" disabled={!hasAvailableModel}>
+          <span className="flex min-w-0 flex-1 items-center gap-2">
+            {group.iconName ? (
+              <Icon name={group.iconName} className="size-4 shrink-0" />
+            ) : null}
+            <span className="truncate">{group.label}</span>
+            {group.badge ? (
+              <Badge
+                variant={group.badgeVariant || "secondary"}
+                className={cn("shrink-0", group.badgeVariant === "default" && "!text-primary-foreground")}
+              >
+                {group.badge}
+              </Badge>
+            ) : null}
+          </span>
+        </DropdownMenuSubTrigger>
+        <DropdownMenuSubContent className="max-h-[320px] min-w-[280px] overflow-y-auto">
+          {group.models.map((model) => renderModelSwitchOption(model, Boolean(getBuiltinModelName(model.model))))}
+        </DropdownMenuSubContent>
+      </DropdownMenuSub>
+    )
+  }, [openModelGroupKey, renderModelSwitchOption])
+
+  const handleConfirmModelSwitch = React.useCallback(async () => {
+    const modelId = pendingSwitchModel?.id
+    if (!modelId || !pendingSwitchModel || modelSwitchSubmitting) return
+
+    const nextModel = pendingSwitchModel
+    setModelSwitchSubmitting(true)
+    const response = await taskControlClientRef.current?.switchModel(modelId, true)
+    setModelSwitchSubmitting(false)
+
+    if (!response) {
+      toast.error(t("taskDetail.page.toast.modelSwitchTimeout"))
+      return
+    }
+
+    if (response.success) {
+      setTask((prev) => prev ? { ...prev, model: nextModel } : prev)
+      setModelSwitchDialogOpen(false)
+      setPendingSwitchModel(null)
+      toast.success(response.message || t("taskDetail.page.toast.modelSwitched"))
+      return
+    }
+
+    setModelSwitchDialogOpen(false)
+    setPendingSwitchModel(null)
+    toast.error(response.message || t("taskDetail.page.toast.modelSwitchFailed"))
+  }, [modelSwitchSubmitting, pendingSwitchModel, t])
+
+  const handleCancel = React.useCallback(() => {
+    streamClientRef.current?.sendCancel()
+  }, [])
+
+  const handleSwitchAgentResources = React.useCallback(
+    async (skillIds: string[], pluginIds: string[]) => {
+      const response = await taskControlClientRef.current?.switchAgentResources(
+        skillIds,
+        pluginIds,
+      )
+      if (response?.success) {
+        setTask((prev) =>
+          prev
+            ? {
+                ...prev,
+                extra: {
+                  ...(prev.extra ?? {}),
+                  skill_ids: skillIds,
+                  plugin_ids: pluginIds,
+                },
+              }
+            : prev,
+        )
+      }
+      return response ?? null
+    },
+    [],
+  )
+
+  const handleResetSession = React.useCallback(async () => {
+    const success = await taskControlClientRef.current?.restart(false)
+    return !!success
+  }, [])
+
+  const handleConfirmResetContext = React.useCallback(async () => {
+    if (resetContextSubmitting) return
+
+    setResetContextSubmitting(true)
+    const success = await handleResetSession()
+    setResetContextSubmitting(false)
+
+    if (success) {
+      setResetContextDialogOpen(false)
+      setContextUsage((prev) => ({ ...prev, used: 0 }))
+      toast.success(t("taskDetail.restart.reset"))
+      return
+    }
+
+    toast.error(t("taskDetail.page.toast.resetContextFailed"))
+  }, [handleResetSession, resetContextSubmitting, t])
+
+  const handleRequestRestartAgent = React.useCallback((clearContext: boolean) => {
+    if (!canInput) return
+    setRestartAgentClearContext(clearContext)
+    setRestartAgentDialogOpen(true)
+  }, [canInput])
+
+  const handleConfirmRestartAgent = React.useCallback(async () => {
+    if (restartAgentSubmitting) return
+
+    setRestartAgentSubmitting(true)
+    const success = await taskControlClientRef.current?.restart(!restartAgentClearContext)
+    setRestartAgentSubmitting(false)
+
+    if (success) {
+      setRestartAgentDialogOpen(false)
+      if (restartAgentClearContext) {
+        setContextUsage((prev) => ({ ...prev, used: 0 }))
+      }
+      toast.success(restartAgentClearContext ? t("taskDetail.page.toast.agentRestartedContextCleared") : t("taskDetail.page.toast.agentRestarted"))
+      return
+    }
+
+    toast.error(restartAgentClearContext ? t("taskDetail.page.toast.restartAgentClearFailed") : t("taskDetail.page.toast.restartAgentFailed"))
+  }, [restartAgentClearContext, restartAgentSubmitting, t])
+
+  const handleConfirmPublishWebsite = React.useCallback(() => {
+    chatInputRef.current?.submitPublishWebsite(serverConfig?.region)
+    setPublishConfirmDialogOpen(false)
+    setPreviewDialogOpen(false)
+  }, [serverConfig?.region])
+
+  const showHistoryLoadButton = historyCursorReady && (!historyLoaded || historyHasMore)
+
+  const getChatScrollContainer = React.useCallback(() => {
+    if (chatScrollRef.current?.isConnected) {
+      return chatScrollRef.current
+    }
+
+    const container = chatScrollRootRef.current?.querySelector('[data-slot="scroll-area-viewport"]') as HTMLDivElement | null
+    chatScrollRef.current = container
+    return container
+  }, [])
+
+  const updateChatScrollState = React.useCallback((options?: { syncAutoScroll?: boolean }) => {
+    const container = getChatScrollContainer()
+    if (!container) return
+
+    const maxScrollTop = Math.max(container.scrollHeight - container.clientHeight, 0)
+    const hasOverflow = maxScrollTop > 4
+    const isAtBottom = !hasOverflow || maxScrollTop - container.scrollTop <= 24
+    setChatAtBottom((previous) => previous === isAtBottom ? previous : isAtBottom)
+
+    if (!hasOverflow) {
+      shouldAutoScrollChatRef.current = true
+      return
+    }
+
+    if (options?.syncAutoScroll && !autoScrollIntentLockedRef.current) {
+      shouldAutoScrollChatRef.current = isAtBottom
+    }
+  }, [getChatScrollContainer])
+
+  React.useEffect(() => {
+    if (showPreparing) return
+
+    const container = getChatScrollContainer()
+    const content = chatContentRef.current
+    if (!container) return
+
+    const handleScroll = () => updateChatScrollState({ syncAutoScroll: true })
+    container.addEventListener("scroll", handleScroll, { passive: true })
+
+    const resizeObserver = new ResizeObserver(() => {
+      updateChatScrollState()
+    })
+    resizeObserver.observe(container)
+    if (content) {
+      resizeObserver.observe(content)
+    }
+
+    updateChatScrollState({ syncAutoScroll: true })
+
+    return () => {
+      container.removeEventListener("scroll", handleScroll)
+      resizeObserver.disconnect()
+    }
+  }, [getChatScrollContainer, showPreparing, updateChatScrollState])
+
+  React.useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      updateChatScrollState()
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [messages, hasSidePanel, hasBottomTerminal, historyLoading, historyLoaded, showHistoryLoadButton, updateChatScrollState])
+
+  const scrollChatToMessage = React.useCallback((messageId: string, options?: TaskMessageVirtualListScrollOptions) => {
+    return taskMessageListRef.current?.scrollToMessage(messageId, options) ?? false
+  }, [])
+
+  const openWorkspaceFileLink = React.useCallback((path: string) => {
+    if (!path) return
+
+    const fileExplorer = taskFileExplorerRef.current
+    if (fileExplorer) {
+      void fileExplorer.openFile(path)
+      return
+    }
+
+    setPendingWorkspaceFilePath(path)
+    if (isMobile) {
+      setMobileToolsView("files")
+      setMobileToolsOpen(true)
+      return
+    }
+    setActiveSidePanel("files")
+  }, [isMobile])
+
+  React.useEffect(() => {
+    const fileExplorerVisible = isMobile
+      ? mobileToolsOpen && mobileToolsView === "files"
+      : activeSidePanel === "files"
+    if (!fileExplorerVisible || !pendingWorkspaceFilePath || !taskFileExplorerRef.current) {
+      return
+    }
+
+    const path = pendingWorkspaceFilePath
+    setPendingWorkspaceFilePath(null)
+    void taskFileExplorerRef.current.openFile(path)
+  }, [activeSidePanel, isMobile, mobileToolsOpen, mobileToolsView, pendingWorkspaceFilePath])
+
+  const scheduleChatScrollToBottom = React.useCallback((behavior: ScrollBehavior = "smooth", options?: { forceAutoScroll?: boolean }) => {
+    const container = getChatScrollContainer()
+    if (!container) return
+
+    if (options?.forceAutoScroll) {
+      shouldAutoScrollChatRef.current = true
+    }
+
+    if (behavior === "smooth") {
+      autoScrollIntentLockedRef.current = true
+      if (autoScrollLockTimeoutRef.current !== null) {
+        clearTimeout(autoScrollLockTimeoutRef.current)
+      }
+      autoScrollLockTimeoutRef.current = setTimeout(() => {
+        autoScrollIntentLockedRef.current = false
+        autoScrollLockTimeoutRef.current = null
+        updateChatScrollState()
+      }, 450)
+    }
+
+    if (autoScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(autoScrollFrameRef.current)
+    }
+
+    autoScrollFrameRef.current = window.requestAnimationFrame(() => {
+      autoScrollFrameRef.current = null
+      const nextContainer = getChatScrollContainer()
+      if (!nextContainer) return
+      if (taskMessageListRef.current?.scrollToBottom(behavior)) return
+      nextContainer.scrollTo({ top: nextContainer.scrollHeight, behavior })
+    })
+  }, [getChatScrollContainer, updateChatScrollState])
+
+  const handleScrollToBottom = React.useCallback(() => {
+    scheduleChatScrollToBottom("smooth", { forceAutoScroll: true })
+  }, [scheduleChatScrollToBottom])
+
+  React.useEffect(() => {
+    return () => {
+      if (autoScrollFrameRef.current !== null) {
+        window.cancelAnimationFrame(autoScrollFrameRef.current)
+        autoScrollFrameRef.current = null
+      }
+      if (autoScrollLockTimeoutRef.current !== null) {
+        clearTimeout(autoScrollLockTimeoutRef.current)
+        autoScrollLockTimeoutRef.current = null
+      }
+      autoScrollIntentLockedRef.current = false
+    }
+  }, [getChatScrollContainer])
+
+  React.useEffect(() => {
+    if (!latestLiveUserInputId) return
+    if (previousLiveUserInputIdRef.current === latestLiveUserInputId) return
+
+    previousLiveUserInputIdRef.current = latestLiveUserInputId
+    scheduleChatScrollToBottom("smooth", { forceAutoScroll: true })
+  }, [latestLiveUserInputId, scheduleChatScrollToBottom])
+
+  React.useEffect(() => {
+    if (!latestCompletedLiveCycleId) return
+    if (previousLiveEndedCycleIdRef.current === latestCompletedLiveCycleId) return
+
+    previousLiveEndedCycleIdRef.current = latestCompletedLiveCycleId
+    if (!shouldAutoScrollChatRef.current) return
+
+    scheduleChatScrollToBottom("smooth")
+  }, [latestCompletedLiveCycleId, scheduleChatScrollToBottom])
+
+  React.useEffect(() => {
+    if (historyLoading) return
+    if (previousRunningMessagesSignatureRef.current === runningMessagesSignature) return
+
+    previousRunningMessagesSignatureRef.current = runningMessagesSignature
+    if (!shouldAutoScrollChatRef.current) return
+
+    scheduleChatScrollToBottom("auto")
+  }, [historyLoading, runningMessagesSignature, scheduleChatScrollToBottom])
+
+  const runMobileToolAction = React.useCallback((action: () => void) => {
+    pendingMobileToolActionRef.current = action
+    setMobileToolsOpen(false)
+  }, [])
+
+  const handleMobileToolsOpenChange = React.useCallback((open: boolean) => {
+    setMobileToolsView("tools")
+    setMobileToolsOpen(open)
+  }, [])
+
+  const handleMobileToolsCloseAutoFocus = React.useCallback((event: Event) => {
+    const action = pendingMobileToolActionRef.current
+    if (!action) return
+
+    event.preventDefault()
+    pendingMobileToolActionRef.current = null
+    action()
+  }, [])
+
+  const detailHeader = (
+    <div className="shrink-0">
+      <div className="relative flex items-center gap-2 pr-10 md:justify-between md:gap-3 md:pr-0">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <DropdownMenu onOpenChange={(open) => {
+            if (!open) {
+              setOpenModelGroupKey(undefined)
+            }
+          }}>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 min-w-0 max-w-[220px] shrink gap-1 px-2 text-xs font-normal"
+                disabled={!canSwitchModel}
+              >
+                <span className="truncate">{getCurrentModelDisplayName() || t("taskDetail.page.models.unknown")}</span>
+                <IconChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="max-h-[min(420px,var(--radix-dropdown-menu-content-available-height))] min-w-[320px] overflow-y-auto max-sm:w-[calc(100vw-2rem)] max-sm:min-w-0">
+              {loadingModels ? (
+                <DropdownMenuItem disabled>{t("taskDetail.common.loading")}</DropdownMenuItem>
+              ) : supportedModels.length === 0 ? (
+                <DropdownMenuItem disabled>{t("taskDetail.page.models.empty")}</DropdownMenuItem>
+              ) : (
+                <DropdownMenuRadioGroup value={currentModelId}>
+                  {isMobile ? modelGroups.map((group) => (
+                    <div key={group.key} className="not-first:mt-1 not-first:border-t not-first:border-border not-first:pt-2">
+                      {renderModelSwitchGroupHeader(group)}
+                      <div className="mt-1 space-y-0.5">
+                        {group.models.map((model) => renderModelSwitchOption(model, Boolean(getBuiltinModelName(model.model)), true))}
+                      </div>
+                    </div>
+                  )) : modelGroups.map(renderModelSwitchGroup)}
+                </DropdownMenuRadioGroup>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <div className="flex w-11 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground md:w-auto">
+            {taskInteractive && hasContextUsage && (
+              <HoverCard
+                open={contextUsagePopoverOpen}
+                onOpenChange={setContextUsagePopoverOpen}
+                openDelay={120}
+                closeDelay={180}
+              >
+                <HoverCardTrigger asChild>
+                  <button
+                    type="button"
+                    className="inline-flex size-5 shrink-0 items-center justify-center rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                    aria-label={t("taskDetail.page.context.usageAria")}
+                    onPointerUp={(event) => {
+                      if (event.pointerType === "touch") {
+                        setContextUsagePopoverOpen((open) => !open)
+                      }
+                    }}
+                  >
+                    <CircularProgress
+                      value={contextUsage.used ?? 0}
+                      max={contextUsage.size ?? 0}
+                      size={20}
+                      strokeWidth={3}
+                      indicatorClassName={contextProgressClassName}
+                    />
+                  </button>
+                </HoverCardTrigger>
+                <HoverCardContent
+                  side="bottom"
+                  align="start"
+                  className="w-90 p-0"
+                >
+                  <div className="overflow-hidden rounded-md bg-background">
+                    <div className="flex items-center gap-3 border-b bg-muted/35 px-3 py-3">
+                      <CircularProgress
+                        value={contextUsage.used ?? 0}
+                        max={contextUsage.size ?? 0}
+                        size={24}
+                        strokeWidth={3}
+                        indicatorClassName={contextProgressClassName}
+                      />
+                      <div className="min-w-0">
+                        <div className={cn("text-sm font-medium", contextProgressClassName)}>
+                          {t("taskDetail.page.context.usedPercent", { percent: contextUsagePercent })}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="px-3 py-2.5 text-xs leading-5 text-foreground">
+                      {t("taskDetail.page.context.warning")}
+                    </div>
+                    <div className="space-y-2 border-t bg-muted/15 p-2">
+                      <div className="rounded-md border bg-background px-3 py-2.5 shadow-xs">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium">{t("taskDetail.page.context.compactTitle")}</div>
+                            <div className="mt-1 text-xs leading-5 text-muted-foreground">
+                              {t("taskDetail.page.context.compactDescription")}
+                            </div>
+                          </div>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant={contextProgress >= 0.5 ? "default" : "secondary"}
+                            className="shrink-0"
+                            disabled={!canInput}
+                            onClick={handleCompactContext}
+                          >
+                            {t("taskDetail.page.context.compactAction")}
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="rounded-md border bg-background px-3 py-2.5 shadow-xs">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium">{t("taskDetail.page.context.resetTitle")}</div>
+                            <div className="mt-1 text-xs leading-5 text-muted-foreground">
+                              {t("taskDetail.page.context.resetDescription")}
+                            </div>
+                          </div>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="secondary"
+                            className="shrink-0"
+                            disabled={!canInput}
+                            onClick={() => {
+                              setContextUsagePopoverOpen(false)
+                              setResetContextDialogOpen(true)
+                            }}
+                          >
+                            {t("taskDetail.page.context.resetAction")}
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </HoverCardContent>
+              </HoverCard>
+            )}
+            {totalTokens > 0 && (
+              <span className="hidden shrink-0 lg:inline">
+                {t("taskDetail.page.tokenUsage", { total: formatTokens(totalTokens) })}
+              </span>
+            )}
+          </div>
+          <div className="absolute right-0 top-1/2 z-30 -translate-y-1/2 md:hidden">
+            <Popover modal open={mobileToolsOpen} onOpenChange={handleMobileToolsOpenChange}>
+              <PopoverTrigger asChild>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon-sm"
+                  className="!h-7 w-8 border-border bg-background shadow-xs"
+                  aria-label={t("taskDetail.page.mobileTools.trigger")}
+                >
+                  <IconDots className="size-4" />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent
+                side="bottom"
+                align="end"
+                sideOffset={6}
+                avoidCollisions={false}
+                className={cn(
+                  "max-h-[65dvh] gap-0 overflow-hidden md:hidden",
+                  mobileToolsView === "tools"
+                    ? "w-max min-w-[120px] max-w-[calc(100vw-2rem)] p-1.5"
+                    : "w-[calc(100vw-2rem)] max-w-[420px] p-0",
+                )}
+                onCloseAutoFocus={handleMobileToolsCloseAutoFocus}
+              >
+                {mobileToolsView === "tools" && (
+                  <div className="flex min-h-0 flex-col">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className="h-11 justify-start gap-2 px-3"
+                      disabled={!taskInteractive}
+                      onClick={() => runMobileToolAction(() => setSkillsDialogOpen(true))}
+                    >
+                      <IconPuzzle className="size-4 shrink-0" />
+                      <span className="truncate">{t("taskDetail.chat.skills")}</span>
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className="h-11 justify-start gap-2 px-3"
+                      aria-label={fileChangesCount > 0 ? `${t("taskDetail.panels.files")} (${fileChangesCount})` : t("taskDetail.panels.files")}
+                      disabled={!taskInteractive}
+                      onClick={() => setMobileToolsView("files")}
+                    >
+                      <span className="relative size-4 shrink-0">
+                        <IconFile className="size-4" />
+                        {fileChangesCount > 0 && (
+                          <span className="absolute -right-1.5 -top-1.5 flex h-3 min-w-3 items-center justify-center rounded-full bg-primary px-0.5 text-[9px] leading-none text-primary-foreground">
+                            {fileChangesCount}
+                          </span>
+                        )}
+                      </span>
+                      <span className="truncate">{t("taskDetail.panels.files")}</span>
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className={cn("h-11 justify-start gap-2 px-3", previewDialogOpen && "bg-accent text-primary")}
+                      aria-label={previewPortCount > 0 ? `${t("taskDetail.panels.preview")} (${previewPortCount})` : t("taskDetail.panels.preview")}
+                      disabled={!taskInteractive}
+                      onClick={() => runMobileToolAction(togglePreviewDialog)}
+                    >
+                      <span className="relative size-4 shrink-0">
+                        <IconDeviceDesktop className="size-4" />
+                        {previewPortCount > 0 && (
+                          <span className="absolute -right-1.5 -top-1.5 flex h-3 min-w-3 items-center justify-center rounded-full bg-primary px-0.5 text-[9px] leading-none text-primary-foreground">
+                            {previewPortCount}
+                          </span>
+                        )}
+                      </span>
+                      <span className="truncate">{t("taskDetail.panels.preview")}</span>
+                    </Button>
+                    {canPublishWebsite && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className={cn("h-11 justify-start gap-2 px-3", publishConfirmDialogOpen && "bg-accent text-primary")}
+                        disabled={!canInput}
+                        onClick={() => runMobileToolAction(() => setPublishConfirmDialogOpen(true))}
+                      >
+                        <IconUpload className="size-4 shrink-0" />
+                        <span className="truncate">{t("taskDetail.page.dialogs.publishWebsite.button")}</span>
+                      </Button>
+                    )}
+                  </div>
+                )}
+                {mobileToolsView === "files" && (
+                  <div className="h-[min(60dvh,520px)] p-2">
+                    <TaskFileExplorer
+                      ref={taskFileExplorerRef}
+                      disabled={!taskInteractive}
+                      repository={taskControlClientRef.current}
+                      refreshSignal={fileRefreshSignal}
+                      onChangesCountChange={setFileChangesCount}
+                      onClosePanel={() => handleMobileToolsOpenChange(false)}
+                      envid={envid}
+                    />
+                  </div>
+                )}
+              </PopoverContent>
+            </Popover>
+          </div>
+        </div>
+        <div className="hidden shrink-0 md:block">
+          <div className="flex items-center gap-0.5">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1 px-2 text-sm font-normal"
+              onClick={() => setSkillsDialogOpen(true)}
+              disabled={!taskInteractive}
+            >
+              <IconPuzzle className="size-3.5 shrink-0" />
+              {t("taskDetail.chat.skills")}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn("h-7 gap-1 px-2 text-sm font-normal", terminalPanelOpen && "text-primary bg-accent")}
+              onClick={toggleTerminalPanel}
+              disabled={!taskInteractive}
+            >
+              <IconTerminal2 className="size-3.5" />
+              {t("taskDetail.panels.terminal")}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn("h-7 gap-1 px-2 text-sm font-normal", activeSidePanel === "files" && "text-primary bg-accent")}
+              onClick={() => toggleSidePanel("files")}
+              disabled={!taskInteractive}
+            >
+              <IconFile className="size-3.5 shrink-0" />
+              {t("taskDetail.panels.files")}{fileChangesCount > 0 ? ` (${fileChangesCount})` : ""}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn("h-7 gap-1 px-2 text-sm font-normal", previewDialogOpen && "text-primary bg-accent")}
+              onClick={togglePreviewDialog}
+              disabled={!taskInteractive}
+            >
+              <IconDeviceDesktop className="size-3.5 shrink-0" />
+              {t("taskDetail.panels.preview")}{previewPortCount > 0 ? ` (${previewPortCount})` : ""}
+            </Button>
+            {canPublishWebsite && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className={cn("h-7 gap-1 px-2 text-sm font-normal", publishConfirmDialogOpen && "text-primary bg-accent")}
+                onClick={() => setPublishConfirmDialogOpen(true)}
+                disabled={!canInput}
+              >
+                <IconUpload className="size-3.5 shrink-0" />
+                {t("taskDetail.page.dialogs.publishWebsite.button")}
+              </Button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+
+  return (
+    <div className="flex flex-col h-full min-h-0 gap-2">
+      {detailHeader}
+      <AlertDialog
+        open={modelSwitchDialogOpen}
+        onOpenChange={(open) => {
+          if (modelSwitchSubmitting) return
+          setModelSwitchDialogOpen(open)
+          if (!open) {
+            setPendingSwitchModel(null)
+          }
+        }}
+      >
+        <AlertDialogContent onKeyDown={modelSwitchDialogNavigation.onKeyDown}>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("taskDetail.page.dialogs.switchModel.title")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("taskDetail.page.dialogs.switchModel.description", {
+                model: pendingSwitchModel ? getModelOptionDisplayName(pendingSwitchModel) : t("taskDetail.page.dialogs.switchModel.selectedModel"),
+              })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel ref={modelSwitchDialogNavigation.cancelRef} disabled={modelSwitchSubmitting}>{t("taskDetail.common.cancel")}</AlertDialogCancel>
+            <Button
+              ref={modelSwitchDialogNavigation.confirmRef}
+              type="button"
+              onClick={() => {
+                void handleConfirmModelSwitch()
+              }}
+              disabled={modelSwitchSubmitting}
+            >
+              {modelSwitchSubmitting && <Spinner className="mr-2 size-4" />}
+              {t("taskDetail.page.dialogs.switchModel.confirm")}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog
+        open={resetContextDialogOpen}
+        onOpenChange={(open) => {
+          if (resetContextSubmitting) return
+          setResetContextDialogOpen(open)
+        }}
+      >
+        <AlertDialogContent onKeyDown={resetContextDialogNavigation.onKeyDown}>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("taskDetail.page.dialogs.resetContext.title")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("taskDetail.page.dialogs.resetContext.description")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel ref={resetContextDialogNavigation.cancelRef} disabled={resetContextSubmitting}>{t("taskDetail.common.cancel")}</AlertDialogCancel>
+            <Button
+              ref={resetContextDialogNavigation.confirmRef}
+              type="button"
+              onClick={() => {
+                void handleConfirmResetContext()
+              }}
+              disabled={resetContextSubmitting}
+            >
+              {resetContextSubmitting && <Spinner className="mr-2 size-4" />}
+              {t("taskDetail.page.dialogs.confirm")}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog
+        open={restartAgentDialogOpen}
+        onOpenChange={(open) => {
+          if (restartAgentSubmitting) return
+          setRestartAgentDialogOpen(open)
+        }}
+      >
+        <AlertDialogContent onKeyDown={restartAgentDialogNavigation.onKeyDown}>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {restartAgentClearContext
+                ? t("taskDetail.page.dialogs.restartAgent.clearTitle")
+                : t("taskDetail.page.dialogs.restartAgent.title")}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {restartAgentClearContext
+                ? t("taskDetail.page.dialogs.restartAgent.clearDescription")
+                : t("taskDetail.page.dialogs.restartAgent.description")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel ref={restartAgentDialogNavigation.cancelRef} disabled={restartAgentSubmitting}>{t("taskDetail.common.cancel")}</AlertDialogCancel>
+            <Button
+              ref={restartAgentDialogNavigation.confirmRef}
+              type="button"
+              onClick={() => {
+                void handleConfirmRestartAgent()
+              }}
+              disabled={restartAgentSubmitting}
+            >
+              {restartAgentSubmitting && <Spinner className="mr-2 size-4" />}
+              {t("taskDetail.page.dialogs.confirm")}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      {showPreparing ? (
+        <TaskPreparingView task={task} />
+      ) : (
+        <ResizablePanelGroup orientation="vertical">
+          <ResizablePanel id="top" defaultSize={hasBottomTerminal ? 75 : 100} minSize={30} className="min-h-0">
+            <ResizablePanelGroup orientation="horizontal">
+              <ResizablePanel id="chat" defaultSize={hasSidePanel ? 50 : 100} minSize={hasSidePanel ? 30 : 100} className="min-w-0">
+                <div className={cn("flex flex-col h-full min-h-0 gap-2 flex-1 min-w-0")}>
+                  <div ref={chatScrollRootRef} className="flex-1 min-h-0 min-w-0 relative">
+                    <ScrollArea className="h-full [&>[data-radix-scroll-area-viewport]>div]:!block">
+                      <TaskMessageVirtualList
+                        ref={taskMessageListRef}
+                        contentRef={chatContentRef}
+                        messages={messages}
+                        cli={task?.cli_name}
+                        fileLinkEnvid={envid}
+                        onWorkspaceFileClick={openWorkspaceFileLink}
+                        getScrollContainer={getChatScrollContainer}
+                        showHistoryLoadButton={showHistoryLoadButton}
+                        historyLoading={historyLoading}
+                        historyLoaded={historyLoaded}
+                        onLoadHistory={() => fetchTaskRounds(historyCursor ?? undefined)}
+                        className={cn(hasSidePanel ? "w-full" : "mx-auto max-w-[960px]")}
+                      />
+                    </ScrollArea>
+                    <TaskUserInputIndex
+                      taskId={taskId ?? null}
+                      liveMessages={messages}
+                      getScrollContainer={getChatScrollContainer}
+                      scrollToMessage={scrollChatToMessage}
+                      historyHasMore={!historyLoaded || historyHasMore}
+                      loadMoreHistory={() => fetchTaskRounds(historyCursorRef.current ?? undefined, 1)}
+                      isAtBottom={chatAtBottom}
+                      scrollToBottom={handleScrollToBottom}
+                    />
+                  </div>
+                  <div className={cn("shrink-0", hasSidePanel ? "w-full" : "mx-auto max-w-[960px] w-full")}>
+                    {taskInteractive && plan.entries.length > 0 && (
+                      <div className="mb-2">
+                        <PlanStepsBlock plan={plan} streamStatus={planStreamStatus} />
+                      </div>
+                    )}
+                    {taskInteractive ? (
+                      <TaskChatInputBox
+                        ref={chatInputRef}
+                        taskId={taskId ?? ""}
+                        streamStatus={streamStatus}
+                        availableCommands={availableCommands}
+                        onSend={handleSend}
+                        onCancel={handleCancel}
+                        onRequestRestartAgent={handleRequestRestartAgent}
+                        whiteboardPersistenceKey={`task-whiteboard-${taskId}`}
+                        sending={sending}
+                        queueSize={0}
+                        executionTimeMs={timeCost}
+                      />
+                    ) : (
+                      <div className="flex items-center justify-center w-full border bg-muted/50 rounded-md p-2 text-xs text-muted-foreground">
+                        {t("taskDetail.page.task.ended")}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </ResizablePanel>
+              {hasSidePanel && (
+                <>
+                  <ResizableHandle withHandle className="ml-2 shrink-0 bg-transparent after:hidden" />
+                  <ResizablePanel id="right-panel" defaultSize={50} minSize={25} className="min-w-0">
+                    <div className="h-full overflow-hidden flex flex-col">
+                      {activeSidePanel === "files" && (
+                        <div className="flex-1 min-h-0 overflow-hidden">
+                          <TaskFileExplorer
+                            ref={taskFileExplorerRef}
+                            disabled={!taskInteractive}
+                            repository={taskControlClientRef.current}
+                            refreshSignal={fileRefreshSignal}
+                            onChangesCountChange={setFileChangesCount}
+                            onClosePanel={() => setActiveSidePanel(null)}
+                            envid={envid}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  </ResizablePanel>
+                </>
+              )}
+            </ResizablePanelGroup>
+          </ResizablePanel>
+          {hasBottomTerminal && (
+            <>
+              <ResizableHandle withHandle className="mt-2 shrink-0 bg-transparent after:hidden" />
+              <ResizablePanel id="bottom-terminal" defaultSize={25} minSize={20} className="min-h-0">
+                <div className="h-full w-full border rounded-md overflow-hidden">
+                  <TaskTerminalPanel envid={envid} disabled={!taskInteractive} onClosePanel={() => setTerminalPanelOpen(false)} />
+                </div>
+              </ResizablePanel>
+            </>
+          )}
+        </ResizablePanelGroup>
+      )}
+      <Dialog open={previewDialogOpen} onOpenChange={setPreviewDialogOpen}>
+        <DialogContent>
+          <DialogHeader className="flex-row items-center justify-start gap-2 pr-8">
+            <DialogTitle>{t("taskDetail.panels.preview")}</DialogTitle>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="shrink-0"
+              onClick={() => void fetchPortForwards()}
+              disabled={!taskInteractive}
+            >
+              <IconReload className="size-4" />
+            </Button>
+          </DialogHeader>
+          <TaskPreviewPanel
+            ports={previewPorts}
+            onRefresh={fetchPortForwards}
+            disabled={!taskInteractive}
+            embedded
+          />
+        </DialogContent>
+      </Dialog>
+      {canPublishWebsite && (
+        <Dialog open={publishConfirmDialogOpen} onOpenChange={setPublishConfirmDialogOpen}>
+          <DialogContent onKeyDown={publishWebsiteDialogNavigation.onKeyDown}>
+            <DialogHeader>
+              <DialogTitle>{t("taskDetail.page.dialogs.publishWebsite.title")}</DialogTitle>
+              <DialogDescription>
+                {t("taskDetail.page.dialogs.publishWebsite.description")}
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button ref={publishWebsiteDialogNavigation.cancelRef} variant="outline" onClick={() => setPublishConfirmDialogOpen(false)}>
+                {t("taskDetail.common.cancel")}
+              </Button>
+              <Button ref={publishWebsiteDialogNavigation.confirmRef} onClick={handleConfirmPublishWebsite}>
+                {t("taskDetail.page.dialogs.publishWebsite.confirm")}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+      <TaskSkillsUpdateDialog
+        open={skillsDialogOpen}
+        onOpenChange={setSkillsDialogOpen}
+        initialSkillIds={task?.extra?.skill_ids ?? []}
+        pluginIds={task?.extra?.plugin_ids ?? []}
+        onSwitch={handleSwitchAgentResources}
+      />
+    </div>
+  )
+}

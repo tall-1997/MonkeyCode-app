@@ -1,0 +1,137 @@
+import React from "react"
+import { Route, BrowserRouter, Routes, Navigate, useLocation, useParams } from "react-router-dom"
+import { ThemeProvider, ThemePathListener } from "@/components/theme-provider"
+import LoginPage from "@/pages/login"
+import WelcomePage from "@/pages/welcome"
+import UserConsolePage from "@/pages/console/user/page"
+import ManagerConsolePage from "@/pages/console/manager/page"
+import TasksPage from "@/pages/console/user/tasks"
+import IDEIDE from "@/pages/console/user/ide-ide"
+import GitBotsPage from "@/pages/console/user/git-bots"
+import TerminalPage from "@/pages/console/user/terminal"
+import FileManagerPage from "@/pages/console/user/file-manager"
+import { Toaster } from "@/components/ui/sonner"
+import SharedTerminalPage from "@/pages/shared-terminal"
+import TeamManagerMembers from "./pages/console/manager/members"
+import TeamManagerSettings from "./pages/console/manager/settings"
+import TeamManagerLogs from "@/pages/console/manager/logs"
+import TeamManagerOverview from "./pages/console/manager/overview"
+import TeamManagerProjects from "./pages/console/manager/projects"
+import TeamManagerTasks from "./pages/console/manager/tasks"
+import TeamManagerConversations from "./pages/console/manager/conversations"
+import TeamManagerLicense from "./pages/console/manager/license"
+import TeamManagerMCP from "./pages/console/manager/mcp"
+import TeamManagerSkills from "./pages/console/manager/skills"
+import TeamOIDCLoginPage from "./pages/team-oidc-login"
+import ResetPasswordPage from "./pages/resetpassword"
+import FindPasswordPage from "./pages/findpassword"
+import PlaygroundPage from "./pages/playground"
+import PublicTaskPage from "./pages/public-task"
+import PostCreatePage from "./pages/post-create"
+import ProjectOverviewPage from "./pages/console/user/project/overview"
+import TaskDetailPage from "./pages/console/user/task/task-detail"
+import PrivacyPolicyPage from "./pages/privacy-policy"
+import UserAgreementPage from "./pages/user-agreement"
+import SelfHostingPage from "./pages/self-hosting"
+import { TooltipProvider } from "@/components/ui/tooltip"
+import { IS_OFFLINE_EDITION } from "@/utils/edition"
+import { SiteRegionPrompt } from "@/components/site-region-prompt"
+import { MatomoConsoleTracker } from "@/components/matomo-console-tracker"
+
+function TaskDetailRoute() {
+  const { taskId } = useParams()
+  return <TaskDetailPage key={taskId} />
+}
+
+function HashAnchorScroller() {
+  const location = useLocation()
+
+  React.useEffect(() => {
+    if (!location.hash) return
+
+    let targetId = location.hash.slice(1)
+    try {
+      targetId = decodeURIComponent(targetId)
+    } catch {
+      return
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      document.getElementById(targetId)?.scrollIntoView({ block: "start" })
+    })
+
+    return () => window.cancelAnimationFrame(frameId)
+  }, [location.pathname, location.hash])
+
+  return null
+}
+
+function App() {
+  return (
+    <ThemeProvider defaultTheme="system" storageKey="monkeycode-theme">
+      <TooltipProvider>
+        <BrowserRouter>
+          <HashAnchorScroller />
+          <ThemePathListener />
+          <MatomoConsoleTracker />
+          <Routes>
+            <Route path="/" element={IS_OFFLINE_EDITION ? <Navigate to="/login" replace /> : <WelcomePage />} />
+            <Route path="/playground" element={<PlaygroundPage />} />
+            <Route path="/playground/create" element={<PostCreatePage />} />
+            <Route path="/privacy-policy" element={<PrivacyPolicyPage />} />
+            <Route path="/user-agreement" element={<UserAgreementPage />} />
+            <Route path="/self-hosting" element={<SelfHostingPage />} />
+            <Route path="/tasks/public" element={<PublicTaskPage />} />
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/team-login/:teamId" element={<TeamOIDCLoginPage />} />
+            <Route path="/findpassword" element={<FindPasswordPage />} />
+            <Route path="/resetpassword" element={<ResetPasswordPage />} />
+            <Route path="/console" element={<UserConsolePage />}>
+              <Route index element={<Navigate to="/console/tasks" replace />} />
+              <Route path="tasks" element={<TasksPage />} />
+              <Route path="task/:taskId" element={<TaskDetailRoute />} />
+              <Route path="project/:projectId" element={<ProjectOverviewPage />} />
+              <Route path="gitbot" element={<GitBotsPage />} />
+              <Route path="ide" element={<IDEIDE />} />
+            </Route>
+            <Route path="/console/terminal" element={<TerminalPage />} />
+            <Route path="/console/files" element={<FileManagerPage />} />
+            <Route path="/sharedterminal" element={<SharedTerminalPage />} />
+            <Route path="/manager" element={<ManagerConsolePage />}>
+              <Route index element={<Navigate to="/manager/overview" replace />} />
+              <Route path="overview" element={<TeamManagerOverview />} />
+              <Route path="projects" element={<TeamManagerProjects />} />
+              <Route path="tasks" element={<TeamManagerTasks />} />
+              <Route path="conversations" element={<TeamManagerConversations />} />
+              <Route path="members" element={<TeamManagerMembers />} />
+              <Route path="skills" element={<TeamManagerSkills />} />
+              <Route path="mcp" element={<TeamManagerMCP />} />
+              <Route path="settings" element={<TeamManagerSettings />} />
+              <Route path="hosts" element={<Navigate to="/manager/settings" replace />} />
+              <Route path="images" element={<Navigate to="/manager/settings" replace />} />
+              <Route path="models" element={<Navigate to="/manager/settings" replace />} />
+              <Route path="logs" element={<TeamManagerLogs />} />
+              <Route path="manager" element={<Navigate to="/manager/members" replace />} />
+              <Route path="oidc" element={<Navigate to="/manager/settings" replace />} />
+              <Route
+                path="license"
+                element={
+                  IS_OFFLINE_EDITION ? (
+                    <TeamManagerLicense />
+                  ) : (
+                    <Navigate to="/manager/overview" replace />
+                  )
+                }
+              />
+            </Route>
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </BrowserRouter>
+        <SiteRegionPrompt />
+        <Toaster position="top-center" />
+      </TooltipProvider>
+    </ThemeProvider>
+  )
+}
+
+export default App

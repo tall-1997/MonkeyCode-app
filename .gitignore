@@ -1,0 +1,30 @@
+# Logs
+logs
+*.log
+.DS_Store
+
+# Editor / IDE
+.vscode/
+.codex/
+
+# Local build artifacts
+monkeycode-ai/
+backend/bin/
+.pnpm-store/
+frontend/.vite/
+
+# Electron (electron-builder)
+desktop/release/
+desktop/release-full/
+frontend/release/
+
+# tar
+*.tar
+*.tgz
+
+# Builder
+dist
+
+# ai
+.superpowers/
+desktop/uidist/
