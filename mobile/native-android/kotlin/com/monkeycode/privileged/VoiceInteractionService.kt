@@ -52,7 +52,7 @@ class MonkeyCodeVoiceInteractionSession(service: VoiceInteractionSessionService)
 class MonkeyCodeRecognitionService : RecognitionService() {
     override fun onStartListening(recognizerIntent: Intent?, listener: Callback?) {
         // 仅保留 Android 数字助理角色资格所需声明
-        listener?.error(RecognitionService.ERROR_NO_MATCH)
+        listener?.error(RecognitionService.Callback.ERROR_NO_MATCH)
     }
 
     override fun onCancel(listener: Callback?) {
