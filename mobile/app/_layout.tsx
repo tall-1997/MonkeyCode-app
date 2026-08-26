@@ -56,6 +56,11 @@ function RootNav() {
           若用 modal 则 iOS 上 insets.top 会与卡片偏移叠加，标题上方出现一大片空白。 */}
       <Stack.Screen name="git-identity-form" />
       <Stack.Screen name="git-oauth" />
+      <Stack.Screen name="privileged-settings" />
+      <Stack.Screen name="local-projects" />
+      <Stack.Screen name="local-project-create" />
+      <Stack.Screen name="local-terminal" />
+      <Stack.Screen name="local-repo" />
     </Stack>
   );
 }
