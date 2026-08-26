@@ -9,9 +9,6 @@ function withPrivilegedExecution(config) {
     // 确保权限声明
     const permissions = [
       'android.permission.SYSTEM_ALERT_WINDOW',
-      'android.permission.WRITE_EXTERNAL_STORAGE',
-      'android.permission.READ_EXTERNAL_STORAGE',
-      'android.permission.MANAGE_EXTERNAL_STORAGE',
       'android.permission.READ_SMS',
       'android.permission.READ_CALENDAR',
       'android.permission.READ_CONTACTS',
@@ -23,17 +20,25 @@ function withPrivilegedExecution(config) {
       'android.permission.FOREGROUND_SERVICE_SPECIAL_USE',
       'android.permission.POST_NOTIFICATIONS',
       'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
+      'android.permission.BIND_ACCESSIBILITY_SERVICE',
+      'android.permission.BIND_VOICE_INTERACTION',
     ];
 
     for (const perm of permissions) {
       asChild(manifest, 'uses-permission', { 'android:name': perm });
     }
 
+    // application 在 Expo manifest 结构中是数组，取第一个元素
+    const mainApplication = Array.isArray(manifest.application)
+      ? manifest.application[0]
+      : manifest.application;
+
     // 注册 AccessibilityService
-    asChild(manifest.application, 'service', {
+    asChild(mainApplication, 'service', {
       'android:name': 'com.monkeycode.privileged.MonkeyCodeAccessibilityService',
       'android:permission': 'android.permission.BIND_ACCESSIBILITY_SERVICE',
       'android:exported': 'true',
+      'android:label': '@string/app_name',
     }, {
       'intent-filter': {
         action: { 'android:name': 'android.accessibilityservice.AccessibilityService' },
@@ -45,10 +50,11 @@ function withPrivilegedExecution(config) {
     });
 
     // 注册 VoiceInteractionService
-    asChild(manifest.application, 'service', {
+    asChild(mainApplication, 'service', {
       'android:name': 'com.monkeycode.privileged.MonkeyCodeVoiceInteractionService',
       'android:permission': 'android.permission.BIND_VOICE_INTERACTION',
       'android:exported': 'true',
+      'android:label': '@string/app_name',
     }, {
       'intent-filter': {
         action: { 'android:name': 'android.service.voice.VoiceInteractionService' },
@@ -59,48 +65,93 @@ function withPrivilegedExecution(config) {
       },
     });
 
+    // 注册 VoiceInteractionSessionService
+    asChild(mainApplication, 'service', {
+      'android:name': 'com.monkeycode.privileged.MonkeyCodeVoiceInteractionSessionService',
+      'android:permission': 'android.permission.BIND_VOICE_INTERACTION',
+      'android:exported': 'true',
+    }, {
+      'intent-filter': {
+        action: { 'android:name': 'android.service.voice.VoiceInteractionSessionService' },
+      },
+    });
+
+    // 注册 RecognitionService
+    asChild(mainApplication, 'service', {
+      'android:name': 'com.monkeycode.privileged.MonkeyCodeRecognitionService',
+      'android:permission': 'android.permission.BIND_RECOGNITION_SERVICE',
+      'android:exported': 'true',
+    }, {
+      'intent-filter': {
+        action: { 'android:name': 'android.speech.RecognitionService' },
+      },
+      'meta-data': {
+        'android:name': 'android.speech.recognition',
+        'android:resource': '@xml/recognition_service_config',
+      },
+    });
+
     return config;
   });
 
   config = withDangerousMod(config, ['android', (config) => {
     const projectRoot = config.modRequest.projectRoot;
     const androidDir = path.join(projectRoot, 'android');
+
     const privilegedDir = path.join(androidDir, 'app', 'src', 'main', 'java', 'com', 'monkeycode', 'privileged');
     const xmlDir = path.join(androidDir, 'app', 'src', 'main', 'res', 'xml');
 
-    // 创建目录
     fs.mkdirSync(privilegedDir, { recursive: true });
     fs.mkdirSync(xmlDir, { recursive: true });
 
-    // 复制 AccessibilityService 配置文件
-    const accessibilityConfig = `<?xml version="1.0" encoding="utf-8"?>
-<accessibility-service
-    xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeAllMask"
-    android:accessibilityFeedbackType="feedbackGeneric"
-    android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows|flagReportViewIds"
-    android:canRetrieveWindowContent="true"
-    android:canPerformGestures="true"
-    android:notificationTimeout="100"
-    android:description="@string/accessibility_service_description" />`;
+    // 拷贝 Kotlin 原生模块源码
+    const kotlinSrcDir = path.join(projectRoot, 'native-android', 'kotlin', 'com', 'monkeycode', 'privileged');
+    if (fs.existsSync(kotlinSrcDir)) {
+      for (const file of fs.readdirSync(kotlinSrcDir)) {
+        if (file.endsWith('.kt')) {
+          fs.copyFileSync(
+            path.join(kotlinSrcDir, file),
+            path.join(privilegedDir, file)
+          );
+        }
+      }
+    }
 
-    fs.writeFileSync(path.join(xmlDir, 'accessibility_service_config.xml'), accessibilityConfig);
+    // 拷贝 XML 资源
+    const xmlSrcDir = path.join(projectRoot, 'native-android', 'res', 'xml');
+    if (fs.existsSync(xmlSrcDir)) {
+      for (const file of fs.readdirSync(xmlSrcDir)) {
+        if (file.endsWith('.xml')) {
+          fs.copyFileSync(
+            path.join(xmlSrcDir, file),
+            path.join(xmlDir, file)
+          );
+        }
+      }
+    }
 
-    // 复制 VoiceInteractionService 配置文件
-    const voiceInteractionConfig = `<?xml version="1.0" encoding="utf-8"?>
-<voice-interaction-service
-    xmlns:android="http://schemas.android.com/apk/res/android"
-    android:sessionService="com.monkeycode.privileged.MonkeyCodeVoiceInteractionSessionService"
-    android:recognitionService="com.monkeycode.privileged.MonkeyCodeRecognitionService"
-    android:supportsAssist="true"
-    android:supportsLaunchVoiceAssistFromKeyguard="true" />`;
-
-    fs.writeFileSync(path.join(xmlDir, 'voice_interaction_service_config.xml'), voiceInteractionConfig);
+    // 确保 accessibility 描述字符串存在
+    ensureStringResource(androidDir);
 
     return config;
   }]);
 
   return config;
+}
+
+function ensureStringResource(androidDir) {
+  const valuesDir = path.join(androidDir, 'app', 'src', 'main', 'res', 'values');
+  const stringsFile = path.join(valuesDir, 'strings.xml');
+  if (!fs.existsSync(stringsFile)) return;
+
+  let content = fs.readFileSync(stringsFile, 'utf8');
+  if (!content.includes('accessibility_service_description')) {
+    content = content.replace(
+      '</resources>',
+      '    <string name="accessibility_service_description">MonkeyCode 无障碍服务 - 用于 AI Agent 操作手机屏幕</string>\n</resources>'
+    );
+    fs.writeFileSync(stringsFile, content);
+  }
 }
 
 function asChild(parent, tag, attrs, children) {
