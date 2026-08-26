@@ -21,6 +21,7 @@ import (
 	"github.com/chaitin/MonkeyCode/backend/biz/skill"
 	"github.com/chaitin/MonkeyCode/backend/biz/static"
 	"github.com/chaitin/MonkeyCode/backend/biz/subscription"
+	"github.com/chaitin/MonkeyCode/backend/biz/sync"
 	"github.com/chaitin/MonkeyCode/backend/biz/task"
 	"github.com/chaitin/MonkeyCode/backend/biz/team"
 	"github.com/chaitin/MonkeyCode/backend/biz/uploader"
@@ -48,6 +49,7 @@ func RegisterAll(i *do.Injector) error {
 	skill.ProvideSkill(i)
 	plugin.ProvidePlugin(i)
 	server.ProvideServer(i)
+	sync.ProvideSync(i)
 	return nil
 }
 
@@ -66,6 +68,7 @@ func InvokeAll(i *do.Injector) {
 	skill.InvokeSkill(i)
 	plugin.InvokePlugin(i)
 	server.InvokeServer(i)
+	sync.InvokeSync(i)
 }
 
 // RegisterOpenSource 注册仅在开源项目中使用的模块
