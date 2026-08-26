@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_service_description">MonkeyCode 无障碍服务 - 用于 AI Agent 操作手机屏幕</string>
+    <string name="voice_assistant_label">MonkeyCode 助手</string>
+    <string name="app_name">MonkeyCode</string>
+</resources>
