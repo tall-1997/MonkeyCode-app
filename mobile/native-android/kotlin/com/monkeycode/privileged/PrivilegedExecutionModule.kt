@@ -376,7 +376,7 @@ class PrivilegedExecutionModule(reactContext: ReactApplicationContext) :
             try {
                 alpineEnvironment.install { progress ->
                     sendEvent("alpineInstallProgress", Arguments.createMap().apply {
-                        putDouble("progress", progress)
+                        putDouble("progress", progress.toDouble())
                     })
                 }
                 val result = Arguments.createMap()
