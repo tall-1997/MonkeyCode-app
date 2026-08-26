@@ -538,6 +538,14 @@ export default function ProfileScreen() {
             <Row icon="brain" label="自定义模型" value="接入自己的大模型" divider onPress={() => router.push('/models')} />
           </Card>
 
+          {/* 本地开发能力入口（Root + LSPosed 特权能力） */}
+          <Card style={{ paddingTop: 14, paddingBottom: 2 }}>
+            <Text style={{ fontSize: 12, fontWeight: '700', color: t.tx3, letterSpacing: 0.5, paddingHorizontal: 16, marginBottom: 2 }}>本地开发</Text>
+            <Row icon="folder" label="本地项目" value="工作区项目管理" onPress={() => router.push('/local-projects')} />
+            <Row icon="terminal" label="本地终端" value="执行 shell 命令" divider onPress={() => router.push('/local-terminal')} />
+            <Row icon="shield" label="特权能力设置" value="Root · LSPosed" divider onPress={() => router.push('/privileged-settings')} />
+          </Card>
+
           {/* 外观：主题 + 点缀色 */}
           <Appearance t={t} />
 
