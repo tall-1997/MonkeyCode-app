@@ -11,7 +11,7 @@
 - **沙箱模式**：无 Root 权限时的执行模式，所有操作限制在 App 沙盒内，仅能使用 Expo 原生模块提供的基础能力
 - **特权模式**：Root + LSPosed 可用时的执行模式，可越过 App 沙盒访问系统底层 API、执行 root shell 命令、读写任意文件、Hook 系统组件
 - **特权执行层**：基于 Eta 架构的 Android 原生模块（Kotlin），负责 Root shell 执行、LSPosed Hook 管理、GUI Agent、系统 API 调用
-- **本地引擎**：在移动设备上运行的 AI Agent 引擎进程，负责执行 AI 编码任务，与桌面端的 ohmyagent 对应
+- **本地引擎**：在移动设备上运行的**自研 AI Agent 引擎**（Kotlin AgentRuntime，不依赖上游二进制），负责执行 AI 编码任务，具备 Root 提权操作手机与 PRoot 免 root 沙箱双通道
 - **本地工作区**：Android 设备文件系统中的项目目录，沙箱模式为 `/data/local/tmp/monkeycode`，特权模式可自定义
 - **离线模式**：设备无网络连接时，仍能使用本地功能进行代码编辑、任务管理和文件操作
 - **GUI Agent**：通过截图、无障碍节点、点击、滚动和输入操作手机屏幕的能力
@@ -205,7 +205,7 @@ WHEN 设备具备 Root 权限且 LSPosed 已安装, THE 系统 SHALL 暴露完�
 
 #### Acceptance Criteria
 
-1. WHEN 用户选择本地模式创建任务, THE 系统 SHALL 启动本地 ohmyagent 引擎进程
+1. WHEN 用户选择本地模式创建任务, THE 系统 SHALL 启动本地自研 Agent 引擎
 2. WHEN 引擎启动成功, THE 系统 SHALL 展示引擎状态
 3. WHEN 用户发送任务, THE 系统 SHALL 通过 stdio JSON-RPC 传递给引擎
 4. WHEN 引擎产生响应, THE 系统 SHALL 实时流式展示
@@ -259,7 +259,7 @@ WHEN 设备具备 Root 权限且 LSPosed 已安装, THE 系统 SHALL 暴露完�
 | Android 原生模块 | Kotlin (Eta-style) | 参考 Eta 架构，Eta 为独立 Android App，MonkeyCode 将其核心作为原生模块集成 |
 | 终端环境 | Android Shell + Alpine Linux | 终端区分 `android` 和 `linux` 两种环境 |
 | 系统集成 | Root + LSPosed | 需要 Root 权限和 libxposed API 102 |
-| 本地引擎 | Go ARM64 交叉编译 | 将 ohmyagent 编译为 arm64-v8a 二进制 |
+| 本地引擎 | 自研 Kotlin AgentRuntime | 内嵌引擎（无需 arm64 二进制），Root 提权 / PRoot 免 root 双通道 |
 | GUI Agent | AccessibilityService + screencap | 参考 Eta 无障碍 + 截图方案 |
 | 离线模式 | 代码编辑与任务管理同等重要 | 离线时两者同时支持 |
 
