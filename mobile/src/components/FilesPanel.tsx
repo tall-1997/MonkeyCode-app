@@ -14,6 +14,8 @@ import { authHeaders, getDownloadUrl } from '@/api/client';
 import { pickWorkspaceFile, uploadWorkspaceFile } from '@/api/upload';
 import { base64DecodeToString, bytesToBase64 } from '@/messages/base64';
 import { Icons, Spinner } from '@/components/Icons';
+import { LocalFilesBrowser } from '@/components/LocalFilesBrowser';
+import { permissionDetector } from '@/local/PermissionDetector';
 import { isNativeFileSaverAvailable, saveFileToDevice } from '@/native/fileSaver';
 import { useTheme, type Theme } from '@/theme';
 
@@ -23,7 +25,7 @@ const ADD_BG = 'rgba(63,185,80,0.14)';
 const DEL_BG = 'rgba(248,81,73,0.13)';
 const MAX_LINES = 1500;
 
-type Tab = 'tree' | 'changes';
+type Tab = 'tree' | 'changes' | 'local';
 
 const baseName = (p: string) => p.split('/').filter(Boolean).pop() ?? p;
 const dirName = (p: string) => p.split('/').filter(Boolean).slice(0, -1).join('/');
@@ -182,6 +184,7 @@ export function FilesPanel({ visible, onClose, control, initialChanges, vmId }: 
   const t = useTheme();
   const { top, bottom } = useSafeAreaInsets();
   const [tab, setTab] = useState<Tab>('tree');
+  const [privileged, setPrivileged] = useState(false);
   const [path, setPath] = useState('');
   const [entries, setEntries] = useState<RepoFileStatus[] | null>(null);
   const [entriesLoading, setEntriesLoading] = useState(false);
@@ -200,6 +203,14 @@ export function FilesPanel({ visible, onClose, control, initialChanges, vmId }: 
   const uploadBusyRef = useRef(false);
   const uploadAbortRef = useRef<AbortController | null>(null);
   const uploadOperationRef = useRef(0);
+
+  // 特权模式检测：决定是否显示「本地」tab（Root + LSPosed 可用时）
+  useEffect(() => {
+    setPrivileged(permissionDetector.isPrivileged());
+    if (permissionDetector.getState() === null) {
+      permissionDetector.detect().then((st) => setPrivileged(st.mode === 'privileged'));
+    }
+  }, []);
 
   // 下载文件或目录（目录由后端打包成 zip）：下完再交给系统分享面板。
   // 会话鉴权靠 cookie：iOS 的 expo-file-system 共享系统 cookie 存储，能流式落盘（带进度、不占内存）；
@@ -440,6 +451,7 @@ export function FilesPanel({ visible, onClose, control, initialChanges, vmId }: 
   const TABS: { key: Tab; label: string; count?: number }[] = [
     { key: 'tree', label: '文件' },
     { key: 'changes', label: '变动', count: changes.length },
+    ...(privileged ? [{ key: 'local' as Tab, label: '本地' }] : []),
   ];
   const uploadPercent = uploadingFile?.total
     ? Math.max(0, Math.min(100, Math.round((uploadingFile.bytes / uploadingFile.total) * 100)))
@@ -481,7 +493,11 @@ export function FilesPanel({ visible, onClose, control, initialChanges, vmId }: 
             </View>
           </View>
 
-          {tab === 'tree' ? (
+          {tab === 'local' ? (
+            <View style={{ flex: 1, backgroundColor: t.bg }}>
+              <LocalFilesBrowser enabled={privileged} />
+            </View>
+          ) : tab === 'tree' ? (
             <View style={{ flex: 1 }} pointerEvents={uploadingFile ? 'none' : 'auto'}>
               <View style={{ flexDirection: 'row', alignItems: 'center', borderBottomWidth: 1, borderColor: t.line }}>
                 <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flex: 1 }} contentContainerStyle={{ alignItems: 'center', paddingHorizontal: 14, paddingVertical: 10, gap: 1 }}>
