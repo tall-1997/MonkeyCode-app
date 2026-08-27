@@ -1,5 +1,6 @@
 import { NativeModules, Platform, NativeEventEmitter } from 'react-native';
 import { permissionDetector } from './PermissionDetector';
+import { utf8ToBase64 } from './localUtils';
 
 const { PrivilegedExecution } = NativeModules;
 
@@ -102,10 +103,10 @@ class EngineBridge {
 
   async sendInput(content: string): Promise<void> {
     if (!this.currentSessionId) throw new Error('No active session');
-    // 通过 stdio 发送用户输入
+    // 通过 stdio 发送用户输入（RN 环境无 Node Buffer，用工具函数编码 UTF-8）
     const frame: EngineFrame = {
       type: 'user-input',
-      data: { content: Buffer.from(content).toString('base64') },
+      data: { content: utf8ToBase64(content) },
       timestamp: Date.now(),
       seq: 0,
     };
