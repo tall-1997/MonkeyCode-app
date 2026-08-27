@@ -15,6 +15,12 @@ class PrivilegedExecutionModule(reactContext: ReactApplicationContext) :
     private val personalDataProvider = PersonalDataProvider(reactContext)
     private val guiAgent = GUIAgent(reactContext)
     private val alpineEnvironment = AlpineEnvironment(reactContext)
+    private val ubuntuEnvironment = UbuntuEnvironment(reactContext)
+
+    private var sandboxType: String = "alpine"
+
+    private val browserService: BrowserService by lazy { BrowserService(reactContext.applicationContext) }
+    private val browserMcpServer: BrowserMcpServer by lazy { BrowserMcpServer(browserService) }
 
     private val sessionDataCallbacks = ConcurrentHashMap<String, (String) -> Unit>()
     private val sessionExitCallbacks = ConcurrentHashMap<String, (Int) -> Unit>()
@@ -440,6 +446,80 @@ class PrivilegedExecutionModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    // ==================== Ubuntu Linux ====================
+
+    @ReactMethod
+    fun installUbuntu(promise: Promise) {
+        val t = Thread {
+            try {
+                ubuntuEnvironment.install { progress ->
+                    safeSendEvent("ubuntuInstallProgress", Arguments.createMap().apply {
+                        putDouble("progress", progress.toDouble())
+                    })
+                }
+                val result = Arguments.createMap()
+                result.putBoolean("success", true)
+                promise.resolve(result)
+            } catch (e: Throwable) {
+                try { promise.reject("UBUNTU_INSTALL_ERROR", safeMessage(e)) }
+                catch (e2: Throwable) { android.util.Log.e("MonkeyCode", "ubuntu install reject failed", e2) }
+            }
+        }
+        t.setUncaughtExceptionHandler { thread, throwable ->
+            android.util.Log.e("MonkeyCode", "Ubuntu install crashed", throwable)
+        }
+        t.start()
+    }
+
+    @ReactMethod
+    fun getUbuntuStatus(promise: Promise) {
+        try {
+            val map = Arguments.createMap()
+            map.putBoolean("installed", ubuntuEnvironment.isInstalled())
+            map.putBoolean("installing", ubuntuEnvironment.isInstalling)
+            promise.resolve(map)
+        } catch (e: Exception) {
+            promise.resolve(false)
+        }
+    }
+
+    @ReactMethod
+    fun execUbuntuCommand(command: String, promise: Promise) {
+        try {
+            val result = ubuntuEnvironment.execCommand(command)
+            val map = Arguments.createMap()
+            map.putString("stdout", result.stdout)
+            map.putString("stderr", result.stderr)
+            map.putInt("exitCode", result.exitCode)
+            promise.resolve(map)
+        } catch (e: Exception) {
+            promise.reject("UBUNTU_EXEC_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
+    fun setSandboxType(type: String, promise: Promise) {
+        try {
+            if (type != "alpine" && type != "ubuntu") {
+                promise.reject("SANDBOX_ERROR", "无效的沙箱类型: $type，仅支持 alpine 或 ubuntu")
+                return
+            }
+            sandboxType = type
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("SANDBOX_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
+    fun getSandboxType(promise: Promise) {
+        try {
+            promise.resolve(sandboxType)
+        } catch (e: Exception) {
+            promise.resolve("alpine")
+        }
+    }
+
     // ==================== Agent Runtime（自研引擎，替代上游 ohmyagent） ====================
 
     private var agentSessionId: String? = null
@@ -450,6 +530,7 @@ class PrivilegedExecutionModule(reactContext: ReactApplicationContext) :
             this.fs = fileSystemOps
             this.gui = guiAgent
             this.alpine = alpineEnvironment
+            this.ubuntu = ubuntuEnvironment
             this.sandboxMode = !isRootAvailable()
         }
     }
@@ -556,6 +637,126 @@ class PrivilegedExecutionModule(reactContext: ReactApplicationContext) :
             promise.resolve(true)
         } catch (e: Exception) {
             promise.reject("AGENT_ERROR", e.message)
+        }
+    }
+
+    // ==================== Browser Automation ====================
+
+    @ReactMethod
+    fun browserNavigate(url: String, promise: Promise) {
+        try {
+            val result = browserService.browserNavigate(url)
+            promise.resolve(result)
+        } catch (e: Exception) {
+            promise.reject("BROWSER_NAVIGATE_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
+    fun browserScreenshot(elementRef: String, promise: Promise) {
+        try {
+            val ref = elementRef.takeIf { it.isNotEmpty() }
+            val result = browserService.browserScreenshot(ref)
+            promise.resolve(result)
+        } catch (e: Exception) {
+            promise.reject("BROWSER_SCREENSHOT_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
+    fun browserSnapshot(promise: Promise) {
+        try {
+            val result = browserService.browserSnapshot()
+            promise.resolve(result)
+        } catch (e: Exception) {
+            promise.reject("BROWSER_SNAPSHOT_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
+    fun browserClick(ref: String, promise: Promise) {
+        try {
+            browserService.browserClick(ref)
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("BROWSER_CLICK_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
+    fun browserType(ref: String, text: String, promise: Promise) {
+        try {
+            browserService.browserType(ref, text)
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("BROWSER_TYPE_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
+    fun browserScroll(ref: String, promise: Promise) {
+        try {
+            val r = ref.takeIf { it.isNotEmpty() }
+            browserService.browserScroll(r)
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("BROWSER_SCROLL_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
+    fun browserEvaluate(expression: String, promise: Promise) {
+        try {
+            val result = browserService.browserEvaluate(expression)
+            promise.resolve(result)
+        } catch (e: Exception) {
+            promise.reject("BROWSER_EVALUATE_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
+    fun browserTabs(action: String, tabId: String, promise: Promise) {
+        try {
+            val tid = tabId.takeIf { it.isNotEmpty() }
+            val result = browserService.browserTabs(action, tid)
+            promise.resolve(result)
+        } catch (e: Exception) {
+            promise.reject("BROWSER_TABS_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
+    fun browserDialog(action: String, promise: Promise) {
+        try {
+            val result = browserService.browserDialog(action)
+            promise.resolve(result)
+        } catch (e: Exception) {
+            promise.reject("BROWSER_DIALOG_ERROR", e.message)
+        }
+    }
+
+    // ==================== MCP Server ====================
+
+    @ReactMethod
+    fun startMcpServer(port: Int, promise: Promise) {
+        try {
+            val result = browserMcpServer.start(port)
+            val map = Arguments.createMap()
+            map.putString("url", result["url"] ?: "")
+            map.putString("token", result["token"] ?: "")
+            promise.resolve(map)
+        } catch (e: Exception) {
+            promise.reject("MCP_START_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
+    fun stopMcpServer(promise: Promise) {
+        try {
+            browserMcpServer.stop()
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("MCP_STOP_ERROR", e.message)
         }
     }
 

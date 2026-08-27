@@ -57,6 +57,9 @@ function RootNav() {
       <Stack.Screen name="git-identity-form" />
       <Stack.Screen name="git-oauth" />
       <Stack.Screen name="privileged-settings" />
+      <Stack.Screen name="skills" />
+      <Stack.Screen name="skill/[name]" />
+      <Stack.Screen name="sandbox-settings" />
       <Stack.Screen name="local-projects" />
       <Stack.Screen name="local-project-create" />
       <Stack.Screen name="local-terminal" />

@@ -80,6 +80,44 @@ async function migrate(database: SQLite.SQLiteDatabase): Promise<void> {
 
     await setVersion(database, 1);
   }
+
+  if (version < 2) {
+    await database.execAsync(`
+      CREATE TABLE IF NOT EXISTS skills_config (
+        name TEXT PRIMARY KEY,
+        source TEXT NOT NULL DEFAULT 'user',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS sandbox_config (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS subagent_sessions (
+        id TEXT PRIMARY KEY,
+        parent_session_id TEXT NOT NULL,
+        agent_type TEXT NOT NULL DEFAULT 'general-purpose',
+        status TEXT NOT NULL DEFAULT 'running',
+        write_paths TEXT,
+        max_turns INTEGER NOT NULL DEFAULT 16,
+        turn_count INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS engine_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        instance_num INTEGER NOT NULL,
+        log_text TEXT,
+        created_at INTEGER NOT NULL
+      );
+    `);
+    await setVersion(database, 2);
+  }
 }
 
 async function getVersion(database: SQLite.SQLiteDatabase): Promise<number> {

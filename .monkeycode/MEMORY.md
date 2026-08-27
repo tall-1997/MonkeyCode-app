@@ -70,3 +70,15 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - `permissions: contents: write` 才能让 GITHUB_TOKEN 创建 Release；`generate_release_notes: true` 会调受限 API 报 403 需移除。
   - GitHub Actions zip 下载 artifact 对该 PAT 返回 401（缺 actions scope），改用 workflow 的 release job 发布即可。
   - LSPosed 模块用 libxposed API 102：Maven Central `io.github.libxposed:api:102.0.0`；入口继承 `XposedModule`，回调参数用 `XposedModuleInterface.ModuleLoadedParam` 等完全限定嵌套类型；AGP 9 内置 Kotlin 不能再 apply `org.jetbrains.kotlin.android` 插件；AGP 9 禁止 manifest 里 `<uses-sdk>`；`META-INF/xposed/java_init.list` 列入口类。
+
+[移动端本地 Agent 架构与参考仓库]
+- Date: 2026-08-27
+- Context: Agent 分析桌面端功能向 Android 复刻方案时总结
+- Category: 工作流协作|环境配置
+- Instructions:
+  - 上游 ohmyagent 引擎未开源，移动端不能直接编译运行；桌面端 ARCHITECTURE.md 中的契约（帧词汇、会话状态机、审批流、子代理、技能）是目标规格，需在移动端自研 AgentRuntime.kt 中实现等价功能。
+  - 移动端 AgentRuntime.kt 位于 `mobile/native-android/kotlin/com/monkeycode/privileged/AgentRuntime.kt`，已有基础 Agent Loop（steering→LLM→tool batch→next turn）、多协议 LLM 调用（OpenAI Chat/Responses/Anthropic）、10 个内置工具、双执行层（Root + PRoot 沙箱）。缺失：完整帧词汇、会话持久化、审批流、子代理、技能系统、浏览器自动化、流式输出、MCP 集成。
+  - 沙箱层使用 Ubuntu 作为主力（参照 Operit 的 Ubuntu 24.04 ARM64 + PRoot，可切 chroot），Alpine 保留作为轻量备选。双沙箱切换：Ubuntu 提供完整 apt 开发环境（git/python/node/gcc），Alpine 作为低存储占用的回退方案。现有 AlpineEnvironment.kt 保留不动，新增 UbuntuEnvironment.kt，由用户设置中选择沙箱类型。
+  - 6 个参考仓库分工：Operit 提供 Ubuntu 24.04 ARM64 用户空间（PRoot，可切 chroot）、三层 GUI 自动化权限、MCP 工具集成，是 Ubuntu 沙箱的主要参考；shiyi-agent 提供 spawn_agent 子代理并行 isolation 与 write_paths 隔离；OpenMinis 提供 SKILL.md 技能生态与 PRoot 构建管线；Eta-HyperOS 提供 Pi Coding Agent 的 Agent Loop 架构参考与结构化工具优先策略；OmniBot 提供 Kotlin+Flutter+React 引擎/UI 分离架构与长期记忆系统；Operit2 提供 Rust 共享运行时跨平台模式。
+  - 桌面端本地功能指引擎驱动（ohmyagent）+ 壳原生服务（repo/uploads/skills/browser/telemetry），云端功能（百智云）是独立模块。移动端本地功能优先，云端次要。
+  - 移动端已具备桌面端没有的独有能力：GUI Agent（无障碍）、设备工具（闹钟/音量/媒体/WiFi/蓝牙）、个人数据（相册/日历/短信/联系人）、语音交互（VoiceInteractionService）、LSPosed Hook 框架，这些在重构中保留不删。

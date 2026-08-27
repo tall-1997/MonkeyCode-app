@@ -7,7 +7,7 @@ interface TerminalSession {
   id: string;
   workDir: string;
   identity: 'user' | 'root';
-  environment: 'android' | 'linux';
+  environment: 'android' | 'linux' | 'ubuntu';
 }
 
 class TerminalBridge {
@@ -41,7 +41,7 @@ class TerminalBridge {
   async createSession(
     workDir: string,
     identity: 'user' | 'root' = 'user',
-    environment: 'android' | 'linux' = 'android'
+    environment: 'android' | 'linux' | 'ubuntu' = 'android'
   ): Promise<string> {
     if (!this.isAvailable()) {
       throw new Error('Terminal is only available in privileged mode');
@@ -62,12 +62,15 @@ class TerminalBridge {
   async execCommand(
     command: string,
     identity: 'user' | 'root' = 'user',
-    environment: 'android' | 'linux' = 'android'
+    environment: 'android' | 'linux' | 'ubuntu' = 'android'
   ): Promise<ShellResult> {
     if (!this.isAvailable()) {
       throw new Error('Terminal is only available in privileged mode');
     }
 
+    if (environment === 'ubuntu') {
+      return PrivilegedExecution.execUbuntuCommand(command);
+    }
     if (environment === 'linux') {
       return PrivilegedExecution.execAlpineCommand(command);
     }

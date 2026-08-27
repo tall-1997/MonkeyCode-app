@@ -11,6 +11,9 @@ export interface GovernorConfig {
   terminalIdentity: 'user' | 'root';
   guiAgentEnabled: boolean;
   systemHookEnabled: boolean;
+  browserEnabled: boolean;
+  mcpServerEnabled: boolean;
+  telemetryEnabled: boolean;
 }
 
 const DEFAULTS: GovernorConfig = {
@@ -21,6 +24,9 @@ const DEFAULTS: GovernorConfig = {
   terminalIdentity: 'user',
   guiAgentEnabled: true,
   systemHookEnabled: false,
+  browserEnabled: true,
+  mcpServerEnabled: false,
+  telemetryEnabled: false,
 };
 
 const KEY = 'mc.governorConfig';
@@ -74,6 +80,11 @@ export const privilegedApi = {
   execAlpine: (command: string): Promise<ShellResult> => {
     if (!PrivilegedExecution) return Promise.reject(new Error('特权模块不可用'));
     return PrivilegedExecution.execAlpineCommand(command);
+  },
+
+  execUbuntu: (command: string): Promise<ShellResult> => {
+    if (!PrivilegedExecution) return Promise.reject(new Error('特权模块不可用'));
+    return PrivilegedExecution.execUbuntuCommand(command);
   },
 
   listDirectory: (path: string) => {
@@ -156,6 +167,86 @@ export const privilegedApi = {
   isAlpineInstalled: () => {
     if (!PrivilegedExecution) return Promise.resolve(false);
     return PrivilegedExecution.isAlpineInstalled();
+  },
+
+  startMcpServer: (port: number = 8899): Promise<{ url: string; token: string }> => {
+    if (!PrivilegedExecution) return Promise.reject(new Error('特权模块不可用'));
+    return PrivilegedExecution.startMcpServer(port);
+  },
+
+  stopMcpServer: (): Promise<boolean> => {
+    if (!PrivilegedExecution) return Promise.resolve(false);
+    return PrivilegedExecution.stopMcpServer();
+  },
+
+  browserNavigate: (url: string): Promise<string> => {
+    if (!PrivilegedExecution) return Promise.reject(new Error('特权模块不可用'));
+    return PrivilegedExecution.browserNavigate(url);
+  },
+
+  browserScreenshot: (elementRef?: string): Promise<string> => {
+    if (!PrivilegedExecution) return Promise.reject(new Error('特权模块不可用'));
+    return PrivilegedExecution.browserScreenshot(elementRef || '');
+  },
+
+  browserSnapshot: (): Promise<string> => {
+    if (!PrivilegedExecution) return Promise.reject(new Error('特权模块不可用'));
+    return PrivilegedExecution.browserSnapshot();
+  },
+
+  browserClick: (ref: string): Promise<boolean> => {
+    if (!PrivilegedExecution) return Promise.reject(new Error('特权模块不可用'));
+    return PrivilegedExecution.browserClick(ref);
+  },
+
+  browserType: (ref: string, text: string): Promise<boolean> => {
+    if (!PrivilegedExecution) return Promise.reject(new Error('特权模块不可用'));
+    return PrivilegedExecution.browserType(ref, text);
+  },
+
+  browserScroll: (ref?: string): Promise<boolean> => {
+    if (!PrivilegedExecution) return Promise.reject(new Error('特权模块不可用'));
+    return PrivilegedExecution.browserScroll(ref || '');
+  },
+
+  browserEvaluate: (expression: string): Promise<string> => {
+    if (!PrivilegedExecution) return Promise.reject(new Error('特权模块不可用'));
+    return PrivilegedExecution.browserEvaluate(expression);
+  },
+
+  browserTabs: (action: string, tabId?: string): Promise<string> => {
+    if (!PrivilegedExecution) return Promise.reject(new Error('特权模块不可用'));
+    return PrivilegedExecution.browserTabs(action, tabId || '');
+  },
+
+  browserDialog: (action: string): Promise<string> => {
+    if (!PrivilegedExecution) return Promise.reject(new Error('特权模块不可用'));
+    return PrivilegedExecution.browserDialog(action);
+  },
+
+  isUbuntuInstalled: (): Promise<boolean> => {
+    if (!PrivilegedExecution) return Promise.resolve(false);
+    return PrivilegedExecution.isUbuntuInstalled();
+  },
+
+  installUbuntu: (): Promise<{ success: boolean }> => {
+    if (!PrivilegedExecution) return Promise.reject(new Error('特权模块不可用'));
+    return PrivilegedExecution.installUbuntuEnvironment();
+  },
+
+  getUbuntuStatus: (): Promise<{ installed: boolean; installing: boolean }> => {
+    if (!PrivilegedExecution) return Promise.resolve({ installed: false, installing: false });
+    return PrivilegedExecution.getUbuntuStatus();
+  },
+
+  setSandboxType: (type: 'ubuntu' | 'alpine'): Promise<void> => {
+    if (!PrivilegedExecution) return Promise.reject(new Error('特权模块不可用'));
+    return PrivilegedExecution.setSandboxType(type);
+  },
+
+  getSandboxType: (): Promise<'ubuntu' | 'alpine'> => {
+    if (!PrivilegedExecution) return Promise.resolve('alpine');
+    return PrivilegedExecution.getSandboxType();
   },
 };
 

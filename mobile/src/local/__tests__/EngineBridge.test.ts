@@ -22,6 +22,30 @@ jest.doMock('@/local/PermissionDetector', () => ({
   permissionDetector: { isPrivileged: () => true, getState: () => null },
 }));
 
+jest.doMock('expo-file-system', () => ({
+  __esModule: true,
+  default: {
+    getInfoAsync: jest.fn().mockResolvedValue({ exists: false, isDirectory: false, size: 0 }),
+    readAsStringAsync: jest.fn().mockResolvedValue(''),
+    writeAsStringAsync: jest.fn(),
+    makeDirectoryAsync: jest.fn(),
+    deleteAsync: jest.fn(),
+    moveAsync: jest.fn(),
+    readDirectoryAsync: jest.fn().mockResolvedValue([]),
+  },
+  getInfoAsync: jest.fn().mockResolvedValue({ exists: false, isDirectory: false, size: 0 }),
+  readAsStringAsync: jest.fn().mockResolvedValue(''),
+  writeAsStringAsync: jest.fn(),
+  makeDirectoryAsync: jest.fn(),
+  deleteAsync: jest.fn(),
+  moveAsync: jest.fn(),
+  readDirectoryAsync: jest.fn().mockResolvedValue([]),
+  Paths: {
+    document: { uri: 'file:///test-documents/' },
+    cache: { uri: 'file:///test-cache/' },
+  },
+}));
+
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const EngineBridge = require('../EngineBridge').default;
 

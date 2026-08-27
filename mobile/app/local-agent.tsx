@@ -17,7 +17,7 @@ import { engineBridge, type EngineConfig, type EngineFrame } from '@/local/Engin
 import { buildEngineConfig, loadAgentModels, toAgentPickerOptions, type AgentModelOption } from '@/local/agentBackend';
 import { useTheme } from '@/theme';
 
-type Msg = { kind: 'cmd' | 'assistant' | 'tool' | 'toolupd' | 'err' | 'sys'; text: string };
+type Msg = { kind: 'cmd' | 'assistant' | 'thought' | 'tool' | 'toolupd' | 'plan' | 'err' | 'sys' | 'approval' | 'subagent'; text: string; permId?: string; toolName?: string; toolArgs?: string };
 
 export default function LocalAgentScreen() {
   const t = useTheme();
@@ -73,27 +73,89 @@ export default function LocalAgentScreen() {
     const unsub = engineBridge.onFrame((frame: EngineFrame) => {
       const kind = frame.kind;
       const data = frame.data;
+      if (frame.type === 'task-started') {
+        historyRef.current = [...historyRef.current, { kind: 'sys', text: '任务开始执行' }];
+        setHistory(historyRef.current);
+        return;
+      }
       if (frame.type === 'task-ended') {
-        historyRef.current = [...historyRef.current, { kind: 'sys', text: '任务完成' }];
+        const status = data?.status || 'finished';
+        const turns = data?.turns ?? 0;
+        historyRef.current = [...historyRef.current, { kind: 'sys', text: `任务${status === 'cancelled' ? '已取消' : '完成'}（${turns} 轮）` }];
         setHistory(historyRef.current);
         setBusy(false);
         setReady(false);
+        return;
+      }
+      if (frame.type === 'task-error') {
+        historyRef.current = [...historyRef.current, { kind: 'err', text: data?.message || '任务执行异常' }];
+        setHistory(historyRef.current);
+        setBusy(false);
+        setReady(false);
+        return;
+      }
+      if (frame.type === 'permission-req') {
+        const permId = data?.tool_call_id || '';
+        const toolName = data?.tool_name || '';
+        const toolArgs = data?.params ? JSON.stringify(data.params) : '';
+        historyRef.current = [...historyRef.current, { kind: 'approval', text: `请求权限: ${toolName}`, permId, toolName, toolArgs }];
+        setHistory(historyRef.current);
+        return;
+      }
+      if (frame.type === 'permission-resolved') {
+        const outcome = data?.outcome || 'denied';
+        historyRef.current = [...historyRef.current, { kind: 'sys', text: `权限${outcome === 'approved' ? '已批准' : '已拒绝'}` }];
+        setHistory(historyRef.current);
+        return;
+      }
+      if (frame.type === 'task-notification') {
+        const msg = data?.message || '';
+        historyRef.current = [...historyRef.current, { kind: 'subagent', text: `子代理完成: ${msg}` }];
+        setHistory(historyRef.current);
         return;
       }
       if (kind === 'acp_event' && data) {
         const dt = data.type;
         if (dt === 'agent_message_chunk') {
           const chunk = data.content || '';
-          // 追加到上一条 assistant 消息
           historyRef.current = appendChunk(historyRef.current, chunk);
+          setHistory(historyRef.current);
+        } else if (dt === 'agent_thought_chunk') {
+          const chunk = data.content || '';
+          historyRef.current = appendThought(historyRef.current, chunk);
           setHistory(historyRef.current);
         } else if (dt === 'tool_call') {
           const name = data.name || '';
           const args = data.arguments || '';
-          historyRef.current = [...historyRef.current, { kind: 'tool', text: `🔧 ${name} ${args}` }];
+          historyRef.current = [...historyRef.current, { kind: 'tool', text: `${name} ${args}` }];
           setHistory(historyRef.current);
         } else if (dt === 'tool_call_update') {
-          historyRef.current = [...historyRef.current, { kind: 'toolupd', text: `✓ ${data.name} 完成: ${truncate(data.result)}` }];
+          const status = data.status || 'completed';
+          if (status === 'failed') {
+            historyRef.current = [...historyRef.current, { kind: 'toolupd', text: `${data.name} 失败: ${truncate(data.error || '')}` }];
+          } else if (status === 'progress') {
+            historyRef.current = [...historyRef.current, { kind: 'toolupd', text: `${data.name} 进行中...` }];
+          } else {
+            historyRef.current = [...historyRef.current, { kind: 'toolupd', text: `${data.name} 完成: ${truncate(data.result || '')}` }];
+          }
+          setHistory(historyRef.current);
+        } else if (dt === 'plan') {
+          const planText = data.content || data.plan || '';
+          historyRef.current = [...historyRef.current, { kind: 'plan', text: planText || '任务规划已生成' }];
+          setHistory(historyRef.current);
+        } else if (dt === 'subagent_tool' || dt === 'subagent_text' || dt === 'subagent_output' || dt === 'child_session') {
+          const subagentName = data.agent_name || data.name || '';
+          const subagentText = data.content || data.text || data.output || '';
+          historyRef.current = [...historyRef.current, { kind: 'subagent', text: `[${subagentName}] ${subagentText}` }];
+          setHistory(historyRef.current);
+        } else if (dt === 'usage_update') {
+          const prompt = data.prompt_tokens ?? 0;
+          const completion = data.completion_tokens ?? 0;
+          historyRef.current = [...historyRef.current, { kind: 'sys', text: `Token 用量: ${prompt}+${completion}` }];
+          setHistory(historyRef.current);
+        } else if (dt === 'compact_status') {
+          const msg = data.message || '上下文已压缩';
+          historyRef.current = [...historyRef.current, { kind: 'sys', text: msg }];
           setHistory(historyRef.current);
         }
       }
@@ -126,6 +188,14 @@ export default function LocalAgentScreen() {
       } catch (e: any) {
         setHistory((h) => [...h, { kind: 'err', text: e.message }]);
       }
+    }
+  };
+
+  const handleApproval = (permId: string, approve: boolean) => {
+    if (approve) {
+      void engineBridge.approvePermission(permId, true);
+    } else {
+      void engineBridge.denyPermission(permId);
     }
   };
 
@@ -175,17 +245,35 @@ export default function LocalAgentScreen() {
             </Text>
           )}
 
-          {history.map((line, i) => (
-            <Text key={i} selectable style={{
-              fontFamily: 'monospace', fontSize: 12.5, lineHeight: 19, marginTop: 2,
-              color: line.kind === 'cmd' ? t.termAcc
-                : line.kind === 'tool' ? '#7aa2f7'
-                : line.kind === 'toolupd' ? '#9ece6a'
-                : line.kind === 'err' ? t.red
-                : line.kind === 'sys' ? t.tx3
-                : t.termTx,
-            }}>{line.text}</Text>
-          ))}
+          {history.map((line, i) => {
+            if (line.kind === 'approval') {
+              return (
+                <View key={i} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 6, paddingVertical: 8, paddingHorizontal: 12, borderRadius: 10, backgroundColor: t.acGhost }}>
+                  <Text style={{ flex: 1, fontFamily: 'monospace', fontSize: 12, color: t.acTx }}>{line.text}</Text>
+                  <Pressable onPress={() => handleApproval(line.permId || '', true)} style={{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, backgroundColor: t.add }}>
+                    <Text style={{ fontSize: 12, fontWeight: '700', color: '#fff' }}>批准</Text>
+                  </Pressable>
+                  <Pressable onPress={() => handleApproval(line.permId || '', false)} style={{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, backgroundColor: t.red }}>
+                    <Text style={{ fontSize: 12, fontWeight: '700', color: '#fff' }}>拒绝</Text>
+                  </Pressable>
+                </View>
+              );
+            }
+            return (
+              <Text key={i} selectable style={{
+                fontFamily: 'monospace', fontSize: 12.5, lineHeight: 19, marginTop: 2,
+                color: line.kind === 'cmd' ? t.termAcc
+                  : line.kind === 'tool' ? '#7aa2f7'
+                  : line.kind === 'toolupd' ? '#9ece6a'
+                  : line.kind === 'thought' ? t.tx3
+                  : line.kind === 'plan' ? '#e0af68'
+                  : line.kind === 'subagent' ? '#bb9af7'
+                  : line.kind === 'err' ? t.red
+                  : line.kind === 'sys' ? t.tx3
+                  : t.termTx,
+              }}>{line.text}</Text>
+            );
+          })}
           {busy && !ready && <Text style={{ color: t.acTx, fontSize: 12, marginTop: 6 }}>引擎启动中…</Text>}
           {busy && ready && <Text style={{ color: t.tx3, fontSize: 12, marginTop: 4 }}>执行中…</Text>}
         </ScrollView>
@@ -214,6 +302,16 @@ export default function LocalAgentScreen() {
       />
     </View>
   );
+}
+
+function appendThought(hist: Msg[], chunk: string): Msg[] {
+  if (hist.length === 0) return [...hist, { kind: 'thought', text: chunk }];
+  const last = hist[hist.length - 1];
+  if (last.kind === 'thought') {
+    const updated = { ...last, text: last.text + chunk };
+    return [...hist.slice(0, -1), updated];
+  }
+  return [...hist, { kind: 'thought', text: chunk }];
 }
 
 function appendChunk(hist: Msg[], chunk: string): Msg[] {

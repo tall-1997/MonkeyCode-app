@@ -42,6 +42,20 @@ export default function PrivilegedSettingsScreen() {
   const [alpineProgress, setAlpineProgress] = useState(0);
   // PRoot 免 root Linux 沙箱：只要 Android + 原生模块存在即可用，不依赖 Root
   const [linuxAvailable, setLinuxAvailable] = useState(false);
+  const [mcpToken, setMcpToken] = useState('');
+
+  useEffect(() => {
+    if (privileged && cfg?.mcpServerEnabled) {
+      privilegedApi.startMcpServer(8899)
+        .then((res: { url: string; token: string }) => setMcpToken(res.token))
+        .catch(() => setMcpToken('启动失败'));
+    }
+    return () => {
+      if (privileged) {
+        privilegedApi.stopMcpServer().catch(() => {});
+      }
+    };
+  }, [privileged, cfg?.mcpServerEnabled]);
 
   useEffect(() => {
     let active = true;
@@ -176,6 +190,34 @@ export default function PrivilegedSettingsScreen() {
             sub="电源键 / 系统助手入口唤起（需 LSPosed 激活）"
             value={cfg.systemHookEnabled} onValueChange={(v) => set({ systemHookEnabled: v })}
             disabled={!privileged} t={t}
+          />
+        </Card>
+
+        <Card style={{ marginHorizontal: 14, marginTop: 12, overflow: 'hidden' }}>
+          <Text style={{ fontSize: 12, fontWeight: '700', color: t.tx3, letterSpacing: 0.5, paddingHorizontal: 16, paddingTop: 14, paddingBottom: 6 }}>高级功能</Text>
+          <SwitchRow
+            label="浏览器自动化"
+            sub="后台 WebView 浏览器控制（navigate/snapshot/click/type 等）"
+            value={cfg.browserEnabled} onValueChange={(v) => set({ browserEnabled: v })}
+            disabled={!privileged} t={t}
+          />
+          <SwitchRow
+            label="MCP Server"
+            sub="本地 MCP 服务端点（Browser 工具协议，端口 8899）"
+            value={cfg.mcpServerEnabled} onValueChange={(v) => set({ mcpServerEnabled: v })}
+            disabled={!privileged} t={t} divider
+          />
+          {cfg.mcpServerEnabled && (
+            <View style={{ paddingHorizontal: 16, paddingVertical: 10, borderTopWidth: StyleSheet.hairlineWidth, borderColor: t.line }}>
+              <Text style={{ fontSize: 11, color: t.tx3, fontFamily: 'monospace' }}>端点: http://127.0.0.1:8899/mcp</Text>
+              <Text style={{ fontSize: 11, color: t.tx3, fontFamily: 'monospace', marginTop: 2 }}>Token: {mcpToken || '未启动'}</Text>
+            </View>
+          )}
+          <SwitchRow
+            label="遥测"
+            sub="匿名使用数据上报，帮助改进产品"
+            value={cfg.telemetryEnabled} onValueChange={(v) => set({ telemetryEnabled: v })}
+            disabled={!privileged} t={t} divider
           />
         </Card>
 
