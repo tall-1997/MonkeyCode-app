@@ -54,3 +54,19 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - 涉及 submodule 拉取时，优先尝试 HTTPS 令牌方式克隆，避免依赖 SSH；克隆前先确认目标仓库是否包含 `.gitmodules` 中记录的 commit。
   - 用户提供过 GitHub 令牌（账号 tall-1997），可用于 git push / GitHub API 操作；不要将令牌写回 `.gitmodules` 或提交到仓库。
   - 功能设计文档（requirements.md / design.md）按 feature-design skill 生成到 `.monkeycode/specs/{feature}/`，commit 到以 `YYMMDD-feat-` 前缀命名的分支后 push 并创建 PR。
+
+[Mobile APK 云端构建经验]
+- Date: 2026-08-27
+- Context: Agent 实现手机端本地能力并构建发布 APK 时发现
+- Category: 构建方法|排错调试|环境配置
+- Instructions:
+  - 移动端新增 Expo 原生依赖必须用 `npx expo install`（会按 SDK 匹配版本），不能直接 `npm install <latest>`；expo-sqlite 装成 57 会与 SDK 55 的 expo-modules-core 不匹配，运行时抛 `NoClassDefFoundError: AnyTypeCache`。
+  - Expo 原生模块（如特权层 Kotlin）不能放在 `mobile/android/`（被 gitignore 且 `expo prebuild --clean` 会删除）；应放 `mobile/native-android/`，由 `withDangerousMod` config plugin 在 prebuild 时拷入。
+  - Expo AndroidManifest 结构中 `manifest.application` 是数组须取 `[0]` 再向内添加 service；`asChild` 序列化 children 属性易错，应显式构造 `{ $: attrs }`（intent-filter.action/meta-data 都要带 `$` 属性对象）。
+  - push 到 main 有时不触发 `.github/workflows/mobile-build.yml`（paths 过滤判定不可靠），稳定做法是手动 `curl -X POST /actions/workflows/{file}/dispatches`。
+  - GitHub Actions 免费 runner 上 NDK 全 ABI 编译超慢：`reactNativeArchitectures: ["arm64-v8a"]` 限架构 + gradle.properties 提 `-Xmx4096m`、`org.gradle.workers.max=2` 防卡死。
+  - 构建日志在 job 运行中下载常返回 404/0 字节，需等 job 完成后拉取；时间戳乱序（C/C++ 并行输出）不代表卡死。
+  - 2 核 runner 上 expo 项目全量构建约 30-40 分钟（NDK 4 ABI 原生库 + openssl）；构建产物约 146MB。
+  - `permissions: contents: write` 才能让 GITHUB_TOKEN 创建 Release；`generate_release_notes: true` 会调受限 API 报 403 需移除。
+  - GitHub Actions zip 下载 artifact 对该 PAT 返回 401（缺 actions scope），改用 workflow 的 release job 发布即可。
+  - LSPosed 模块用 libxposed API 102：Maven Central `io.github.libxposed:api:102.0.0`；入口继承 `XposedModule`，回调参数用 `XposedModuleInterface.ModuleLoadedParam` 等完全限定嵌套类型；AGP 9 内置 Kotlin 不能再 apply `org.jetbrains.kotlin.android` 插件；AGP 9 禁止 manifest 里 `<uses-sdk>`；`META-INF/xposed/java_init.list` 列入口类。

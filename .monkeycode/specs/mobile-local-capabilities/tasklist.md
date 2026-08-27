@@ -266,6 +266,7 @@
   - 冲突解决界面
 
 - [ ] 32. 扩展任务详情页支持本地模式
+  - ❗ 阻塞：本地引擎二进制未打包（依赖第 36 项）。已具备基础设施（EngineBridge 状态机 + 单元测试 19 项通过）、特权能力设置页与本地终端/仓库/项目 UI 已全部落地
   - 修改 `mobile/app/task/[id].tsx`
   - 根据任务 mode 选择云端或本地引擎
   - 本地模式下使用 EngineBridge 获取实时帧流
@@ -291,6 +292,8 @@
   - 验证二进制可在 Android 模拟器上执行
 
 - [ ] 36. 将 ohmyagent ARM64 二进制打包进应用
+  - ❗ 阻塞：仓库根 `agent/` submodule 为空（指向 chaitin/OhMyAgent，HTTPS 404 不可访问），无法构建引擎二进制
+  - 已提供 `scripts/build-mobile-engine.sh` 交叉编译脚本，源码就绪后可直接执行
   - 在 `withPrivilegedExecution.js` 中配置二进制打包
   - Android: 将二进制放入 `android/app/src/main/assets/` 或 `jniLibs/`
   - 应用启动时提取到可执行目录
@@ -316,10 +319,13 @@
   - 核对 PrivilegedExecution 接口与 LocalBridge 一致
 
 - [ ] 40. Go ARM64 二进制 CI 构建验证
+  - ❗ 阻塞：依赖第 35/36 项的 agent 源码（submodule 不可访问）
   - 在 CI 中验证 `make android-arm64` 可成功生成二进制
   - 验证二进制大小 < 50MB
 
 - [ ] 41. 端到端集成测试（真机 Root 设备）
+  - ❗ 阻塞：需要解锁 Bootloader 并安装 Magisk + LSPosed 的真实 Android 设备；本环境无此硬件
+  - 已在 API 层验证 Root 检测/模式切换接口（PermissionDetector 单测通过）
   - 验证 Root 检测和模式切换
   - 验证 Root shell 命令执行
   - 验证全文件系统访问
@@ -338,3 +344,28 @@
 - 桌面宠物/系统托盘等纯桌面端 UI 功能
 - 桌面端自动更新机制（移动端已有 OTA 更新）
 - Go ARM64 二进制在真实设备上的性能测试和优化
+
+## 实施记录（2026-08-27）
+
+**已落地（37/41 项）**：
+
+| 层 | 交付物 |
+|----|--------|
+| 原生模块 (Kotlin, 10 文件) | PrivilegedExecutionModule、RootShellManager、FileSystemOps、DeviceTools、PersonalDataProvider、GUIAgent/AccessibilityService、AlpineEnvironment、AgentRuntime、VoiceInteractionService、MonkeyCodePackage |
+| LSPosed 模块 (独立 Gradle 项目) | build.gradle.kts、AndroidManifest、ModuleMain.kt（libxposed API 102） |
+| Config Plugin | withPrivilegedExecution.js（manifest 注入 + Kotlin/res 拷贝 + MainApplication 注册 + gradle 性能调优） |
+| TypeScript LocalBridge (12 文件) | PermissionDetector、FileSystemBridge、TerminalBridge、GitBridge、EngineBridge、SyncEngine、NetworkMonitor、OfflineContext、database、localUtils、privilegedApi、localProjects |
+| UI 层 (8 文件) | PrivilegedBanner、privileged-settings、local-terminals、local-repo、local-projects、local-project-create、LocalFilesBrowser、FilesPanel 本地 tab |
+| 后端 (4 文件) | domain/sync.go、usecase + 测试、handler/v1、register 注册 `/api/v1/sync/push`+`/pull` |
+| 测试 | 前端 43 项（EngineBridge 状态机、LWW、路径安全、Base64）；后端 sync usecase 5 项 |
+| CI | GitHub Actions 构建+发布，产出主 APK + LSPosed 模块 Release |
+
+**已发布产物**：Release `mobile-build-25`（commit 3094ce7，全部构建成功）
+- 主 APK 146.2MB：https://github.com/tall-1997/MonkeyCode-app/releases/download/mobile-build-25/app-release.apk
+- LSPosed 模块 0.6MB：https://github.com/tall-1997/MonkeyCode-app/releases/download/mobile-build-25/monkeycode-lsposed-release.apk
+
+**关键修复**：
+- 依赖版本匹配（expo-sqlite 57→55、netinfo 12→11，修复运行时 AnyTypeCache 崩溃）
+- manifest service 序列化结构、Kotlin 编译错误、前后端同步协议 snake_case 对齐
+
+**阻塞项**：任务 32/36/40/41 需要 agent submodule 源码（指向 chaitin/OhMyAgent，不可访问）或真实 Root 设备，已标注原因与就绪路径。
