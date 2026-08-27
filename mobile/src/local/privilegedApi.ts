@@ -146,9 +146,11 @@ export const privilegedApi = {
     return PrivilegedExecution.performInput(text);
   },
 
-  installAlpine: (onProgress?: (v: number) => void) => {
+  installAlpine: () => {
     if (!PrivilegedExecution) return Promise.reject(new Error('特权模块不可用'));
-    return PrivilegedExecution.installAlpineEnvironment(onProgress);
+    // 原生签名 installAlpineEnvironment(promise) 由 RN 自动注入 Promise；
+    // 进度通过 native 事件 "alpineInstallProgress" 广播，不应传入 JS 回调。
+    return PrivilegedExecution.installAlpineEnvironment();
   },
 
   isAlpineInstalled: () => {
