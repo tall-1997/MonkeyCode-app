@@ -3,8 +3,8 @@
  * 沙箱模式下所有开关禁用并提示。
  */
 import { useNavigation, useRouter } from 'expo-router';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, NativeEventEmitter, NativeModules, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
+import React, { useCallback, useEffect, useState } from 'react';
+import { Alert, DeviceEventEmitter, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Icons } from '@/components/Icons';
 import { PrivilegedBanner } from '@/components/PrivilegedBanner';
@@ -60,12 +60,12 @@ export default function PrivilegedSettingsScreen() {
     return () => { active = false; };
   }, []);
 
-  // 监听原生 "alpineInstallProgress" 进度事件（installAlpineEnvironment 广播，RN 自动注入 Promise）
+  // 监听原生 "alpineInstallProgress" 进度事件。
+  // 原生端用 RCTDeviceEventEmitter 全局发射，JS 端用全局 DeviceEventEmitter 接收；
+  // 不要用 new NativeEventEmitter(NativeModule) —— legacy 模块不支持 addListener，
+  // 在 TurboModule 下构造会抛异常导致崩溃。
   useEffect(() => {
-    const mod = NativeModules.PrivilegedExecution;
-    if (!mod) return;
-    const emitter = new NativeEventEmitter(mod);
-    const sub = emitter.addListener('alpineInstallProgress', (e: { progress?: number }) => {
+    const sub = DeviceEventEmitter.addListener('alpineInstallProgress', (e: { progress?: number }) => {
       if (typeof e?.progress === 'number') setAlpineProgress(e.progress);
     });
     return () => { sub.remove(); };
