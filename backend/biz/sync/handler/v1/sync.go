@@ -6,7 +6,6 @@ import (
 	"github.com/GoYoko/web"
 	"github.com/samber/do"
 
-	"github.com/chaitin/MonkeyCode/backend/biz/sync/usecase"
 	"github.com/chaitin/MonkeyCode/backend/domain"
 	"github.com/chaitin/MonkeyCode/backend/errcode"
 	"github.com/chaitin/MonkeyCode/backend/middleware"
@@ -50,7 +49,7 @@ func NewSyncHandler(i *do.Injector) (*SyncHandler, error) {
 //	@Router			/api/v1/sync/push [post]
 func (h *SyncHandler) Push(c *web.Context, req domain.SyncPushReq) error {
 	user := middleware.GetUser(c)
-	resp, err := h.usecase.Push(c.Request().Context(), user.ID, req)
+	resp, err := h.usecase.Push(c.Request().Context(), user.ID.String(), req)
 	if err != nil {
 		return errcode.ErrDatabaseQuery.Wrap(err)
 	}
@@ -71,7 +70,7 @@ func (h *SyncHandler) Push(c *web.Context, req domain.SyncPushReq) error {
 //	@Router			/api/v1/sync/pull [post]
 func (h *SyncHandler) Pull(c *web.Context, req domain.SyncPullReq) error {
 	user := middleware.GetUser(c)
-	resp, err := h.usecase.Pull(c.Request().Context(), user.ID, req)
+	resp, err := h.usecase.Pull(c.Request().Context(), user.ID.String(), req)
 	if err != nil {
 		return errcode.ErrDatabaseQuery.Wrap(err)
 	}
