@@ -49,7 +49,7 @@ graph TD
         W["Root (su)"]
         X["LSPosed Module"]
         Y["AccessibilityService"]
-        Z["ohmyagent Engine"]
+        Z["PRoot Linux Sandbox (Alpine, 免 root)"]
     end
 
     A --> B
@@ -336,39 +336,38 @@ LSPosed Module:
   - 目标签名漂移时停止 Hook 并记录
 ```
 
-### 7. AlpineEnvironment
+### 7. AlpineEnvironment (PRoot 免 root)
 
-Alpine Linux 工具环境管理。
+内置 Linux 工具环境，参考 OpenMinis / Operit / shiyi-agent 的方案。
 
 ```
 AlpineEnvironment:
-  - 下载固定版本 minirootfs，校验 SHA-256
-  - 解压到 App 私有目录
-  - 通过独立 mount namespace + chroot 运行
-  - 挂载 /proc、/dev、/sdcard
-  - /workspace 绑定到 Android 工作目录
+  - PRoot 用户态 chroot（免 root），取代需 root 的 mount namespace + chroot
+  - PRoot 二进制 + Alpine minirootfs 由 prepare_android_sandbox.sh 固化进 APK assets
+  - assets 缺失时在线下载固定版本兜底，校验 SHA-256
+  - 绑定 /proc、/dev、/sdcard、/workspace 到 App 工作目录
   - 预装 Git、Python、rg、fd、curl、jq、SQLite、压缩工具
-  - 进程结束时命名空间销毁，不残留 bind mount
+  - 沙箱模式（无 root）也能运行完整 Linux 工具链
 ```
 
 ### 8. AgentRuntime
 
-Agent Runtime，参考 Eta 的 AgentLoop 设计。
+Agent Runtime：**自研引擎（无上游 ohmyagent）**，直接对接桩排 LLM API，参考 Eta 的 AgentLoop 设计。
 
 ```
-AgentRuntime:
+AgentRuntime (Kotlin, 内嵌):
   - AgentLoop: 单次 run 的状态机
-    - pending steering → provider response → assistant history
-    - → tool batch (serial) → contiguous tool results
-    - → optional image observations → next turn / final result
-  - AgentModelClient: 稳定门面，配置与跨进程会话 DTO
-  - AgentPromptBuilder: 系统约束、Skill 索引、历史、当前用户输入
-  - AgentToolCatalog: 模型可见的工具 schema
-  - AgentRunController: 取消、暂停、steering 队列
-  - AgentRuntimeSession: RUNNING → COMMITTING → TERMINAL 状态机
-  - 单次 run 最多 64 个模型回合、256 个工具调用
-  - cancel 通过独立进程组终止 shell 进程
-  - 工具参数在执行前按 Schema 重新校验
+    - 初始输入 → provider response → assistant history
+    - → tool batch (串行) → tool results → 消费 steering 队列 → next turn
+  - 工具执行统一通道：
+    - Root 可用 → RootShellManager / FileSystemOps / GUIAgent（提权操作手机，对齐 Eta）
+    - 无 Root   → AlpineEnvironment (PRoot 免 root 沙箱) 兜底
+  - agent 工具：read_file/write_file/list_directory/exec_command/
+    install_package/screenshot/gui_click/gui_type/get_accessibility_tree
+  - AgentConfig: model/baseUrl/apiKey/contextWindow/maxOutput/initialInput/workDir
+  - 工具参数执行前按 JSON Schema 重新校验（模型输出不可信）
+  - 帧词汇对齐桌面端：task-running/acp_event、tool_call、task-ended
+  - 经 PrivilegedExecutionModule 暴露给 RN：startAgent/sendAgentInput/cancel/pause/stop
 ```
 
 ### 9. FileSystemBridge (TypeScript)

@@ -134,11 +134,6 @@ class AlpineEnvironment(private val context: Context) {
         return runProcess(cmd)
     }
 
-    /** 运行单条命令（非 shell 内嵌），用于安装工具档案等一次性任务。 */
-    fun execOnce(runAsRoot: Boolean = true): LinuxCommandResult {
-        throw UnsupportedOperationException("execOnce 已并入 execCommand")
-    }
-
     /** 预装默认工具（可选，安装完成后调用）。 */
     fun installToolProfile(onProgress: (Float) -> Unit): LinuxCommandResult {
         if (!isInstalled()) throw IllegalStateException("Linux 环境未安装")
