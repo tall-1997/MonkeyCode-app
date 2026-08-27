@@ -531,9 +531,12 @@ class PrivilegedExecutionModule(reactContext: ReactApplicationContext) :
     // ==================== Event Helpers ====================
 
     fun sendEvent(eventName: String, params: WritableMap) {
-        reactApplicationContext
-            .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
-            .emit(eventName, params)
+        // RN 要求 JS 事件模块在主线程发射；后台线程调用会崩溃导致白屏。
+        reactApplicationContext.runOnUiQueueThread {
+            reactApplicationContext
+                .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                .emit(eventName, params)
+        }
     }
 
     // ==================== Private Helpers ====================

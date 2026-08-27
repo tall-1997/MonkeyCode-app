@@ -3,8 +3,8 @@
  * 沙箱模式下所有开关禁用并提示。
  */
 import { useNavigation, useRouter } from 'expo-router';
-import React, { useCallback, useEffect, useState } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Alert, NativeEventEmitter, NativeModules, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Icons } from '@/components/Icons';
 import { PrivilegedBanner } from '@/components/PrivilegedBanner';
@@ -60,6 +60,17 @@ export default function PrivilegedSettingsScreen() {
     return () => { active = false; };
   }, []);
 
+  // 监听原生 "alpineInstallProgress" 进度事件（installAlpineEnvironment 广播，RN 自动注入 Promise）
+  useEffect(() => {
+    const mod = NativeModules.PrivilegedExecution;
+    if (!mod) return;
+    const emitter = new NativeEventEmitter(mod);
+    const sub = emitter.addListener('alpineInstallProgress', (e: { progress?: number }) => {
+      if (typeof e?.progress === 'number') setAlpineProgress(e.progress);
+    });
+    return () => { sub.remove(); };
+  }, []);
+
   const refreshStatus = useCallback(async () => {
     if (!privileged) return;
     try {
@@ -93,14 +104,16 @@ export default function PrivilegedSettingsScreen() {
 
   const installAlpine = () => {
     if (alpineBusy) return;
-    Alert.alert('安装 Linux 工具环境', '将下载并安装 Alpine Linux 环境（约 100MB），内含 Git、Python、rg、fd 等工具。确定继续？', [
+    Alert.alert('安装 Linux 工具环境', '将下载并安装 Alpine Linux 环境（约 100MB 以内，内含 Git、Python、rg、fd 等工具）。确定继续？', [
       { text: '取消', style: 'cancel' },
       {
         text: '开始安装',
         onPress: () => {
           setAlpineBusy(true);
           setAlpineProgress(0);
-          privilegedApi.installAlpine((p) => setAlpineProgress(p))
+          // 不传回调参数：原生 installAlpineEnvironment(promise) 由 RN 自动注入 Promise，
+          // 进度经 alpineInstallProgress 事件更新（见上方监听）。避免 bridge 参数冲突白屏。
+          privilegedApi.installAlpine()
             .then(() => { setAlpineBusy(false); setAlpineInstalled(true); Alert.alert('安装完成', 'Linux 工具环境已就绪。'); })
             .catch((e: Error) => { setAlpineBusy(false); Alert.alert('安装失败', e.message); });
         },
