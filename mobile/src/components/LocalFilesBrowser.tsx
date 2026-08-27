@@ -4,9 +4,11 @@
  */
 import React, { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import * as FileSystem from 'expo-file-system/legacy';
 import { Icons } from '@/components/Icons';
 import { Card, EmptyView, LoadingView, PrimaryButton } from '@/components/ui';
 import { privilegedApi } from '@/local/privilegedApi';
+import { permissionDetector } from '@/local/PermissionDetector';
 import { useTheme, type Theme } from '@/theme';
 
 export interface FileEntry {
@@ -17,9 +19,11 @@ export interface FileEntry {
   modificationTime: number;
 }
 
-export function LocalFilesBrowser({ startPath = '/sdcard', enabled = true }: { startPath?: string; enabled?: boolean }) {
+export function LocalFilesBrowser({ startPath, enabled = true }: { startPath?: string; enabled?: boolean }) {
+  // 特权模式 → 完整文件系统；沙箱模式 → App 私有文档目录（免 root）
+  const initialPath = startPath ?? (permissionDetector.isPrivileged() ? '/sdcard' : (FileSystem.documentDirectory ?? ''));
   const t = useTheme();
-  const [cwd, setCwd] = useState(startPath);
+  const [cwd, setCwd] = useState(initialPath);
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -43,8 +47,8 @@ export function LocalFilesBrowser({ startPath = '/sdcard', enabled = true }: { s
 
   useEffect(() => {
     if (!enabled) return;
-    void load(startPath);
-  }, [enabled, startPath, load]);
+    void load(initialPath);
+  }, [enabled, initialPath, load]);
 
   const refresh = useCallback(async () => {
     setRefreshing(true);
@@ -69,7 +73,7 @@ export function LocalFilesBrowser({ startPath = '/sdcard', enabled = true }: { s
   if (!enabled) {
     return (
       <View style={{ padding: 20 }}>
-        <EmptyView title="需要 Root 权限" subtitle="本地文件浏览依赖特权模式（Root + LSPosed），请先在系统环境开启。" icon="lock" />
+        <EmptyView title="本地文件暂不可用" subtitle="请先在「特权能力设置」安装 Linux 工具环境（PRoot 免 root），或获取 Root 权限浏览完整文件系统。" icon="folder" />
       </View>
     );
   }
