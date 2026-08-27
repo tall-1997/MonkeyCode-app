@@ -107,6 +107,10 @@ function withPrivilegedExecution(config) {
       }
     }
 
+    // 拷贝 Linux 沙箱资源（PRoot + Alpine minirootfs）到 APK assets
+    // 由 scripts/prepare_android_sandbox.sh 构建期生成；缺失时运行时走在线兜底
+    copySandboxAssets(projectRoot, androidDir);
+
     // 确保 accessibility 描述字符串存在
     ensureStringResource(androidDir);
 
@@ -169,6 +173,27 @@ function tuneGradleProperties(androidDir) {
   }
 
   fs.writeFileSync(propsFile, content);
+}
+
+function copySandboxAssets(projectRoot, androidDir) {
+  const srcDir = path.join(projectRoot, 'native-android', 'assets');
+  const assetsMain = path.join(androidDir, 'app', 'src', 'main', 'assets');
+  if (!fs.existsSync(srcDir)) return;
+  fs.mkdirSync(assetsMain, { recursive: true });
+  // 递归复制 native-android/assets/* → android app assets/
+  (function copy(src, dest) {
+    if (!fs.existsSync(src)) return;
+    for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+      const s = path.join(src, entry.name);
+      const d = path.join(dest, entry.name);
+      if (entry.isDirectory()) {
+        fs.mkdirSync(d, { recursive: true });
+        copy(s, d);
+      } else if (entry.isFile()) {
+        fs.copyFileSync(s, d);
+      }
+    }
+  })(srcDir, assetsMain);
 }
 
 function ensureStringResource(androidDir) {

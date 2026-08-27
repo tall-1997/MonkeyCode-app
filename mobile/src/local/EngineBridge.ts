@@ -1,12 +1,10 @@
 import { NativeModules, Platform, NativeEventEmitter } from 'react-native';
 import { permissionDetector } from './PermissionDetector';
-import { utf8ToBase64 } from './localUtils';
 
 const { PrivilegedExecution } = NativeModules;
 
-interface EngineConfig {
-  binaryPath: string;
-  configDir: string;
+/** 本地引擎配置：直接对接自研 AgentRuntime（OpenAI 兼容端点），无上游 ohmyagent。 */
+export interface EngineConfig {
   workDir: string;
   modelConfig: {
     type: string;
@@ -19,12 +17,14 @@ interface EngineConfig {
     thinking: { enabled: boolean; effort: string };
   };
   systemPrompt?: string;
+  initialInput?: string;
   skills?: string[];
+  maxTurns?: number;
 }
 
-type EngineStatus = 'stopped' | 'starting' | 'ready' | 'crashed' | 'failed';
+export type EngineStatus = 'stopped' | 'starting' | 'ready' | 'crashed' | 'failed';
 
-interface EngineFrame {
+export interface EngineFrame {
   type: string;
   kind?: string;
   data?: any;
@@ -58,29 +58,39 @@ class EngineBridge {
     return this.status;
   }
 
-  async startEngine(config: EngineConfig): Promise<void> {
-    if (this.status === 'ready' || this.status === 'starting') return;
-
+  /** 启动本地自研 Agent。返回引擎会话 id。 */
+  async startEngine(config: EngineConfig): Promise<string> {
+    if (this.status === 'ready' || this.status === 'starting') {
+      return this.currentSessionId || '';
+    }
     this.setStatus('starting');
     this.retryCount = 0;
-
     try {
-      if (PrivilegedExecution) {
-        await PrivilegedExecution.startAgent(JSON.stringify(config));
-      }
+      if (!PrivilegedExecution) throw new Error('特权模块不可用');
+      const sid = await PrivilegedExecution.startAgent(JSON.stringify(config));
+      this.currentSessionId = sid;
       this.setStatus('ready');
+      return sid as string;
     } catch (e: any) {
       await this.handleStartFailure(e);
+      throw e;
     }
+  }
+
+  /** 发送用户输入（注入 steering 队列，下一轮模型回合生效）。 */
+  async sendInput(content: string): Promise<void> {
+    if (!this.currentSessionId) throw new Error('No active session');
+    if (PrivilegedExecution) {
+      await PrivilegedExecution.sendAgentInput(content);
+      return;
+    }
+    throw new Error('特权模块不可用');
   }
 
   async stopEngine(): Promise<void> {
     if (this.status === 'stopped') return;
-
     try {
-      if (PrivilegedExecution) {
-        await PrivilegedExecution.stopAgent();
-      }
+      if (PrivilegedExecution) await PrivilegedExecution.stopAgent();
     } catch (_) {
     } finally {
       this.setStatus('stopped');
@@ -88,35 +98,12 @@ class EngineBridge {
     }
   }
 
-  async restartEngine(): Promise<void> {
-    this.retryCount = 0;
-    await this.stopEngine();
-    // 需要外部传入 config
-  }
-
-  async createSession(task: { description: string; attachments?: string[] }): Promise<string> {
-    if (this.status !== 'ready') throw new Error('Engine not ready');
-    const sessionId = `session_${Date.now()}`;
-    this.currentSessionId = sessionId;
-    return sessionId;
-  }
-
-  async sendInput(content: string): Promise<void> {
-    if (!this.currentSessionId) throw new Error('No active session');
-    // 通过 stdio 发送用户输入（RN 环境无 Node Buffer，用工具函数编码 UTF-8）
-    const frame: EngineFrame = {
-      type: 'user-input',
-      data: { content: utf8ToBase64(content) },
-      timestamp: Date.now(),
-      seq: 0,
-    };
-    this.frameListeners.forEach((l) => l(frame));
+  async pauseEngine(): Promise<void> {
+    if (PrivilegedExecution && this.currentSessionId) await PrivilegedExecution.pauseAgent();
   }
 
   async cancelTask(): Promise<void> {
-    if (PrivilegedExecution && this.currentSessionId) {
-      await PrivilegedExecution.cancelAgent();
-    }
+    if (PrivilegedExecution && this.currentSessionId) await PrivilegedExecution.cancelAgent();
     this.currentSessionId = null;
   }
 
@@ -161,7 +148,6 @@ class EngineBridge {
         })
       );
       await new Promise((resolve) => setTimeout(resolve, delay));
-      // 重试需要外部重新调用 startEngine
     } else {
       this.setStatus('failed');
       this.errorListeners.forEach((l) =>
