@@ -35,6 +35,7 @@ class AgentRuntime(private val context: Context) {
     var fs: FileSystemOps? = null
     var gui: GUIAgent? = null
     var alpine: AlpineEnvironment? = null
+    var ubuntu: UbuntuEnvironment? = null
     var executor: ((String, JSONObject) -> String)? = null
     var sandboxMode: Boolean = false
 

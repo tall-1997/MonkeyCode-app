@@ -67,7 +67,7 @@ class BrowserService(private val context: Context) {
                 val selector = resolveRef(elementRef)
                 val js = """
                     (function() {
-                        var el = document.querySelector('$selector');
+                        var el = document.querySelector('${selector}');
                         if (!el) return null;
                         var r = el.getBoundingClientRect();
                         return JSON.stringify({x: r.x, y: r.y, w: r.width, h: r.height});
@@ -149,7 +149,7 @@ class BrowserService(private val context: Context) {
         val tab = getActiveTab()
         handler.post {
             tab.webView.evaluateJavascript(
-                "(function(){var el=document.querySelector('$selector');if(el){el.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});el.click();return true;}return false;})()",
+                "(function(){var el=document.querySelector('${selector}');if(el){el.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});el.click();return true;}return false;})()",
                 null
             )
         }
@@ -161,7 +161,7 @@ class BrowserService(private val context: Context) {
         val tab = getActiveTab()
         handler.post {
             tab.webView.evaluateJavascript(
-                "(function(){var el=document.querySelector('$selector');if(!el)return false;el.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});el.focus();if('value' in el){el.value='$escaped'}else if(el.isContentEditable){el.textContent='$escaped'}el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return true;})()",
+                "(function(){var el=document.querySelector('${selector}');if(!el)return false;el.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});el.focus();if('value' in el){el.value='${escaped}'}else if(el.isContentEditable){el.textContent='${escaped}'}el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return true;})()",
                 null
             )
         }
@@ -173,7 +173,7 @@ class BrowserService(private val context: Context) {
             val selector = resolveRef(ref)
             handler.post {
                 tab.webView.evaluateJavascript(
-                    "(function(){var el=document.querySelector('$selector');if(el){el.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});return true;}return false;})()",
+                    "(function(){var el=document.querySelector('${selector}');if(el){el.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});return true;}return false;})()",
                     null
                 )
             }
