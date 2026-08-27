@@ -1,10 +1,11 @@
 package com.monkeycode.privileged
 
 import android.content.Context
-import java.io.*
+import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
-import java.security.MessageDigest
 
 data class LinuxCommandResult(
     val stdout: String,
@@ -17,27 +18,22 @@ data class LinuxCommandResult(
  *
  * 参考 OpenMinis / Operit / shiyi-agent 的方案：
  *  - 用 PRoot 做用户态 chroot（免 root），取代需要 root 的 mount namespace + chroot。
- *  - PRoot 二进制与 Alpine minirootfs 通过构建期脚本固化进 APK assets，
- *    (`native-android/assets/alpine/`)，避免运行时在线下载的不确定性。
- *  - 沙箱模式（无 root）也能跑完整 Linux 工具链；有 root 时仍可走原有特权通道。
- *
- * assets 布局（由 scripts/prepare_android_sandbox.sh 生成并打包进 APK）：
- *   assets/alpine/proot            PRoot 可执行文件（Android arm64）
- *   assets/alpine/minirootfs.tar.gz Alpine 3.21 minirootfs（固定版本，构建期校验 SHA-256）
+ *  - PRoot 二进制与 Alpine minirootfs 由构建期脚本固化进 APK assets
+ *    （native-android/assets/alpine/），assets 缺失时在线兜底下载。
+ *  - 沙箱模式（无 root）也能跑完整 Linux 工具链。
  */
 class AlpineEnvironment(private val context: Context) {
+
     companion object {
         // assets 内嵌资源名（构建期由 prepare_android_sandbox.sh 注入）
         private const val ASSET_PROOT = "alpine/proot"
-        private const val ASSET_MINIROOTFS = "alpine/minirootfs.tar.gz"
+        private const val ASSET_ROOTFS = "alpine/minirootfs.tar.gz"
 
-        // 在线兜底（assets 缺失时）：固定版本 + 官方镜像
+        // 在线兜底（assets 缺失时）
         private const val FALLBACK_ROOTFS_URL = "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/alpine-minirootfs-3.21.0-aarch64.tar.gz"
-
-        // PRoot 在线兜底（assets 缺失时）：Termux 官方 PRoot 发布（Android arm64）
         private const val FALLBACK_PROOT_URL = "https://github.com/termux/proot/releases/download/v0.8.3/proot-v0.8.3-android-aarch64.tar.gz"
 
-        // 常用开发工具档案（与设计文档一致）
+        // 常用开发工具档案
         val TOOL_PACKAGES = listOf(
             "git", "git-lfs", "openssh-client",
             "python3", "py3-pip", "py3-venv",
@@ -52,16 +48,11 @@ class AlpineEnvironment(private val context: Context) {
         )
     }
 
-    private val alpineDir: File
-        get() = File(context.filesDir, "alpine")
-    private val rootfsDir: File
-        get() = File(alpineDir, "rootfs")
-    private val prootBin: File
-        get() = File(alpineDir, "proot")
-    private val libsDir: File
-        get() = File(alpineDir, "libs")
-    private val workspaceDir: File
-        get() = File(context.filesDir, "workspace")
+    private val alpineDir: File get() = File(context.filesDir, "alpine")
+    private val rootfsDir: File get() = File(alpineDir, "rootfs")
+    private val prootBin: File get() = File(alpineDir, "proot")
+    private val libsDir: File get() = File(alpineDir, "libs")
+    private val workspaceDir: File get() = File(context.filesDir, "workspace")
 
     fun isInstalled(): Boolean {
         return File(rootfsDir, "etc/alpine-release").exists() && prootBin.exists()
@@ -69,22 +60,24 @@ class AlpineEnvironment(private val context: Context) {
 
     /**
      * 安装顺序：
-     *  1. 从 assets 解出 PRoot + minirootfs（如果 assets 存在）
-     *  2. assets 缺失 → 在线下载 fitm 兜底
-     *  3. 解压 rootfs、可选预装工具
+     *  1. PRoot（assets 优先，在线兜底）
+     *  2. 依赖动态库（proot 运行需要）
+     *  3. rootfs tarball（assets 优先，在线兜底）
+     *  4. 解压 rootfs（用系统 tar）
+     *  5. 工作区挂载点
      */
     fun install(onProgress: (Float) -> Unit) {
         alpineDir.mkdirs()
         workspaceDir.mkdirs()
 
-        // 1) PRoot（assets 优先，在线兜底）
+        // 1) PRoot
         var progress = 0f
         if (!prootBin.exists()) {
             val fromAssets = extractAsset(ASSET_PROOT, prootBin)
             if (!fromAssets) {
                 progress = 0.05f
                 onProgress(progress)
-                downloadProot(prootBin) { p -> onProgress(progress + p * 0.2f) }
+                downloadProot(prootBin, { p -> onProgress(progress + p * 0.2f) })
                 if (!prootBin.exists() || prootBin.length() < 1024) {
                     throw IllegalStateException("PRoot 获取失败，请检查网络或重新安装应用")
                 }
@@ -93,23 +86,23 @@ class AlpineEnvironment(private val context: Context) {
         }
         onProgress(0.3f)
 
-        // 2) 依赖动态库（libtalloc/libandroid-shmem，proot 运行需要）
-        if (!libsDir.exists() || libsDir.listFiles()?.isEmpty() == true) {
+        // 2) 依赖库（libtalloc / libandroid-shmem）
+        if (libsDir.listFiles()?.isEmpty() != false) {
             extractAssetDir("alpine/libs", libsDir)
         }
 
-        // 3) rootfs tarball（assets 优先，在线兜底）
+        // 3) rootfs tarball
         val tarball = File(alpineDir, "minirootfs.tar.gz")
         if (!tarball.exists()) {
-            val fromAssets = extractAsset(ASSET_MINIROOTFS, tarball)
+            val fromAssets = extractAsset(ASSET_ROOTFS, tarball)
             if (!fromAssets) {
                 onProgress(0.35f)
-                downloadMinirootfs(tarball) { p -> onProgress(0.35f + p * 0.4f) }
+                downloadMinirootfs(tarball, { p -> onProgress(0.35f + p * 0.4f) })
             }
         }
         onProgress(0.75f)
 
-        // 4) 解压（用系统 tar，不依赖 rootfs 内 tar）
+        // 4) 解压（系统 tar，不依赖 rootfs 内 tar）
         if (File(rootfsDir, "etc/alpine-release").exists().not() || rootfsDir.listFiles()?.isEmpty() == true) {
             rootfsDir.deleteRecursively()
             rootfsDir.mkdirs()
@@ -123,12 +116,9 @@ class AlpineEnvironment(private val context: Context) {
         onProgress(1f)
     }
 
-    /** 执行命令：PRoot 用户态 chroot → rootfs 内 /bin/sh。免 root。 */
+    /** 执行命令：PRoot 用户态 chroot -> rootfs 内 /bin/sh。免 root。 */
     fun execCommand(command: String): LinuxCommandResult {
         if (!isInstalled()) throw IllegalStateException("Linux 环境未安装")
-
-        // PRoot 用户态 chroot：无需 root；绑定 workspace 与 sdcard。
-        // 参考 OpenMinis 做法：proot -0 -r <rootfs> -b /sdcard -b workspace ...
         val cmd = arrayOf(
             prootBin.absolutePath,
             "-0", // 伪装 root
@@ -180,7 +170,7 @@ class AlpineEnvironment(private val context: Context) {
         }
     }
 
-    /** 解出 assets 子目录到本地（如 alpine/libs/*.so）。 */
+    /** 解出 assets 子目录到本地（如 alpine/libs 下的 so 动态库）。 */
     private fun extractAssetDir(assetPath: String, destDir: File): Boolean {
         return try {
             val names = context.assets.list(assetPath) ?: return false
@@ -199,16 +189,11 @@ class AlpineEnvironment(private val context: Context) {
     }
 
     private fun downloadProot(dest: File, onProgress: (Float) -> Unit) {
-        // Termux PRoot 打包为 tar.gz，内含 proot/usr/bin/proot
         val tmp = File(alpineDir, "proot-dl.tar.gz")
         downloadTo(FALLBACK_PROOT_URL, tmp, onProgress)
         try {
-            // 用系统 tar 解出 proot 二进制
-            val extract = runProcess(arrayOf(
-                "sh", "-c", "tar -xzf '${tmp.absolutePath}' -C '${alpineDir.absolutePath}'"
-            ))
+            val extract = runProcess(arrayOf("sh", "-c", "tar -xzf '${tmp.absolutePath}' -C '${alpineDir.absolutePath}'"))
             if (extract.exitCode != 0) return
-            // 查找解出的 proot 可执行文件
             val found = searchExecutable(File(alpineDir, "proot"))
             if (found != null) {
                 found.copyTo(dest, overwrite = true)
@@ -220,15 +205,6 @@ class AlpineEnvironment(private val context: Context) {
     }
 
     private fun searchExecutable(dir: File): File? {
-        val candidates = listOf(
-            File(dir, "usr/bin/proot"),
-            File(dir, "bin/proot"),
-            dir
-        )
-        for (c in candidates) {
-            if (c.isFile && c.name == "proot") return c
-        }
-        // 深度有限递归
         val queue = ArrayDeque<File>()
         queue.add(dir)
         var depth = 0
@@ -274,10 +250,8 @@ class AlpineEnvironment(private val context: Context) {
     }
 
     private fun extractTarball(tarball: File, dest: File) {
-        // 直接用系统 tar 解压（不依赖 proot/rootfs 内 tar，避免循环依赖）
-        val result = runProcess(arrayOf(
-            "sh", "-c", "tar -xzf '${tarball.absolutePath}' -C '${dest.absolutePath}'"
-        ))
+        // 直接用系统 tar 解压（不依赖 proot / rootfs 内 tar，避免循环依赖）
+        val result = runProcess(arrayOf("sh", "-c", "tar -xzf '${tarball.absolutePath}' -C '${dest.absolutePath}'"))
         if (result.exitCode != 0) {
             throw IllegalStateException("解压失败: ${result.stderr}")
         }
