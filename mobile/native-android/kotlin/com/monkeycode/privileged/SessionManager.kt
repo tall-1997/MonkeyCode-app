@@ -7,9 +7,6 @@ import java.io.File
 import java.io.FileWriter
 import java.io.RandomAccessFile
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.locks.ReentrantReadWriteLock
-import kotlin.concurrent.read
-import kotlin.concurrent.write
 
 /**
  * 会话持久化管理器 —— 参照桌面端 driver/session.rs 的 sidecar 模式。
@@ -76,7 +73,7 @@ class SessionManager(private val context: Context) {
 
     private val sessionsDir: File = File(context.filesDir, "sessions")
     private val sessions = ConcurrentHashMap<String, SessionMeta>()
-    private val journalWriters = ConcurrentHashMap<String, ReentrantReadWriteLock>()
+    private val journalWriters = ConcurrentHashMap<String, Any>()
 
     init {
         sessionsDir.mkdirs()
@@ -95,7 +92,7 @@ class SessionManager(private val context: Context) {
             status = SessionStatus.CREATED
         )
         sessions[id] = meta
-        journalWriters[id] = ReentrantReadWriteLock()
+        journalWriters[id] = Any()
 
         val sessionDir = File(sessionsDir, id)
         sessionDir.mkdirs()
@@ -160,7 +157,7 @@ class SessionManager(private val context: Context) {
     }
 
     fun sessionHistory(id: String, cursor: Long, limit: Int = 50): List<JSONObject> {
-        val eventsFile = File(sessionsDir, id, "events.jsonl")
+        val eventsFile = File(File(sessionsDir, id), "events.jsonl")
         if (!eventsFile.exists()) return emptyList()
 
         val frames = mutableListOf<JSONObject>()
@@ -185,7 +182,7 @@ class SessionManager(private val context: Context) {
     }
 
     fun sessionOutline(id: String): List<JSONObject> {
-        val eventsFile = File(sessionsDir, id, "events.jsonl")
+        val eventsFile = File(File(sessionsDir, id), "events.jsonl")
         if (!eventsFile.exists()) return emptyList()
 
         val outline = mutableListOf<JSONObject>()
@@ -208,7 +205,7 @@ class SessionManager(private val context: Context) {
     }
 
     fun sessionFrame(id: String, seq: Long): JSONObject? {
-        val eventsFile = File(sessionsDir, id, "events.jsonl")
+        val eventsFile = File(File(sessionsDir, id), "events.jsonl")
         if (!eventsFile.exists()) return null
 
         try {
@@ -255,8 +252,8 @@ class SessionManager(private val context: Context) {
 
     fun appendFrame(id: String, frame: JSONObject) {
         val lock = journalWriters[id] ?: return
-        lock.write {
-            val eventsFile = File(sessionsDir, id, "events.jsonl")
+        synchronized(lock) {
+val eventsFile = File(File(sessionsDir, id), "events.jsonl")
             try {
                 FileWriter(eventsFile, true).use { writer ->
                     writer.write(frame.toString())
@@ -269,8 +266,8 @@ class SessionManager(private val context: Context) {
 
     fun appendReplayFrame(id: String, frame: JSONObject) {
         val lock = journalWriters[id] ?: return
-        lock.write {
-            val replayFile = File(sessionsDir, id, "replay.jsonl")
+        synchronized(lock) {
+            val replayFile = File(File(sessionsDir, id), "replay.jsonl")
             try {
                 FileWriter(replayFile, true).use { writer ->
                     writer.write(frame.toString())
@@ -353,7 +350,7 @@ class SessionManager(private val context: Context) {
     }
 
     fun getEventCount(id: String): Long {
-        val eventsFile = File(sessionsDir, id, "events.jsonl")
+        val eventsFile = File(File(sessionsDir, id), "events.jsonl")
         if (!eventsFile.exists()) return 0
         return try {
             eventsFile.readLines().size.toLong()
@@ -388,7 +385,7 @@ class SessionManager(private val context: Context) {
     }
 
     private fun writeMeta(meta: SessionMeta) {
-        val metaFile = File(sessionsDir, meta.id, "meta.json")
+        val metaFile = File(File(sessionsDir, meta.id), "meta.json")
         metaFile.parentFile?.mkdirs()
         try {
             metaFile.writeText(JSONObject().apply {
