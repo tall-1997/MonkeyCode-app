@@ -2,6 +2,7 @@ package com.monkeycode.privileged
 
 import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
+import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
@@ -14,7 +15,6 @@ class PrivilegedExecutionModule(reactContext: ReactApplicationContext) :
     private val personalDataProvider = PersonalDataProvider(reactContext)
     private val guiAgent = GUIAgent(reactContext)
     private val alpineEnvironment = AlpineEnvironment(reactContext)
-    private val agentRuntime: AgentRuntime? = null // 延迟初始化
 
     private val sessionDataCallbacks = ConcurrentHashMap<String, (String) -> Unit>()
     private val sessionExitCallbacks = ConcurrentHashMap<String, (Int) -> Unit>()
@@ -411,22 +411,118 @@ class PrivilegedExecutionModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    // ==================== Agent Runtime ====================
+    // ==================== Agent Runtime（自研引擎，替代上游 ohmyagent） ====================
+
+    private var agentSessionId: String? = null
+    private val agentRuntime: AgentRuntime by lazy {
+        AgentRuntime(reactContext).apply {
+            // 注入统一执行层：Root 提权优先，PRoot 沙箱兜底
+            this.shell = rootShellManager
+            this.fs = fileSystemOps
+            this.gui = guiAgent
+            this.alpine = alpineEnvironment
+            this.sandboxMode = !isRootAvailable()
+        }
+    }
+
+    private fun isRootAvailable(): Boolean {
+        return try {
+            val p = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
+            val ok = p.waitFor() == 0
+            ok
+        } catch (e: Exception) { false }
+    }
 
     @ReactMethod
     fun startAgent(configJson: String, promise: Promise) {
         try {
-            // 延迟实现
-            promise.reject("NOT_IMPLEMENTED", "AgentRuntime not yet implemented")
+            val cfg = org.json.JSONObject(configJson)
+            val model = cfg.optJSONObject("modelConfig") ?: JSONObject()
+            val agentConfig = AgentRuntime.AgentConfig(
+                model = model.optString("model", ""),
+                baseUrl = model.optString("baseUrl", ""),
+                apiKey = model.optString("apiKey", ""),
+                contextWindow = model.optInt("contextWindow", 128000),
+                maxOutput = model.optInt("maxOutput", 32768),
+                thinking = model.optJSONObject("thinking")?.optBoolean("enabled", false) ?: false,
+                systemPrompt = cfg.optString("systemPrompt", ""),
+                initialInput = cfg.optString("initialInput", ""),
+                skills = emptyList(),
+                tools = cfg.optJSONArray("tools")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList(),
+                maxTurns = cfg.optInt("maxTurns", 64),
+                maxToolCalls = cfg.optInt("maxToolCalls", 256),
+                workDir = cfg.optString("workDir", "")
+            )
+
+            if (model.optString("baseUrl").isBlank() || model.optString("apiKey").isBlank()) {
+                promise.reject("AGENT_CONFIG_ERROR", "缺少模型 baseUrl 或 apiKey")
+                return
+            }
+
+            val sid = agentRuntime.startSession(
+                agentConfig,
+                onFrame = { frame ->
+                    sendEvent("engineFrame", Arguments.createMap().apply {
+                        putString("type", frame.optString("type", "task-running"))
+                        putString("kind", frame.optString("kind"))
+                        putString("data", frame.optJSONObject("data")?.toString() ?: "{}")
+                        putDouble("timestamp", System.currentTimeMillis().toDouble())
+                        putInt("seq", frame.optInt("seq", 0))
+                    })
+                },
+                onError = { msg ->
+                    sendEvent("engineStatus", Arguments.createMap().apply {
+                        putString("status", "crashed")
+                        putString("message", msg)
+                    })
+                }
+            )
+            agentSessionId = sid
+            promise.resolve(sid)
         } catch (e: Exception) {
             promise.reject("AGENT_ERROR", e.message)
         }
     }
 
     @ReactMethod
+    fun sendAgentInput(content: String, promise: Promise) {
+        try {
+            val sid = agentSessionId ?: throw IllegalStateException("Agent 未启动")
+            // 通过 steering 队列注入下一条用户输入
+            agentRuntime.sendSteering(sid, content)
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("AGENT_INPUT_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
+    fun cancelAgent(promise: Promise) {
+        try {
+            agentSessionId?.let { agentRuntime.cancelSession(it) }
+            agentSessionId = null
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("AGENT_CANCEL_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
+    fun pauseAgent(promise: Promise) {
+        try {
+            agentSessionId?.let { agentRuntime.pauseSession(it) }
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("AGENT_PAUSE_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
     fun stopAgent(promise: Promise) {
         try {
-            promise.reject("NOT_IMPLEMENTED", "AgentRuntime not yet implemented")
+            agentSessionId?.let { agentRuntime.cancelSession(it) }
+            agentSessionId = null
+            promise.resolve(true)
         } catch (e: Exception) {
             promise.reject("AGENT_ERROR", e.message)
         }
