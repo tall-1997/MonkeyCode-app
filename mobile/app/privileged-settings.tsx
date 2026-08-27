@@ -40,14 +40,18 @@ export default function PrivilegedSettingsScreen() {
   const [alpineInstalled, setAlpineInstalled] = useState(false);
   const [alpineBusy, setAlpineBusy] = useState(false);
   const [alpineProgress, setAlpineProgress] = useState(0);
+  // PRoot 免 root Linux 沙箱：只要 Android + 原生模块存在即可用，不依赖 Root
+  const [linuxAvailable, setLinuxAvailable] = useState(false);
 
   useEffect(() => {
     let active = true;
     void (async () => {
       setPrivileged(permissionDetector.isPrivileged());
-      if (permissionDetector.getState() === null) {
-        const st = await permissionDetector.detect();
-        if (active) setPrivileged(st.mode === 'privileged');
+      const st = permissionDetector.getState();
+      const detected = st ?? await permissionDetector.detect();
+      if (active) {
+        setPrivileged(detected.mode === 'privileged');
+        setLinuxAvailable(detected.capabilities.alpineLinux || detected.capabilities.fileSystem);
       }
       const c = await loadGovernorConfig();
       if (active) setCfg(c);
@@ -166,7 +170,7 @@ export default function PrivilegedSettingsScreen() {
           <Text style={{ fontSize: 12, fontWeight: '700', color: t.tx3, letterSpacing: 0.5, marginBottom: 10 }}>Linux 工具环境 (Alpine)</Text>
           <Text style={{ fontSize: 13, color: t.tx2, lineHeight: 19, marginBottom: 14 }}>
             {alpineInstalled ? '已安装 · 可在终端中选择 linux 环境使用 Git、Python、rg、fd 等工具'
-              : '未安装 · 安装后可获得完整 Linux 开发工具链'}
+              : '未安装 · 安装后可获得完整 Linux 开发工具链（PRoot 免 root，沙箱模式即可用）'}
           </Text>
           {alpineBusy ? (
             <View style={{ gap: 8 }}>
@@ -176,7 +180,7 @@ export default function PrivilegedSettingsScreen() {
               <Text style={{ fontSize: 12, color: t.tx3, textAlign: 'center' }}>{Math.round(alpineProgress * 100)}%</Text>
             </View>
           ) : (
-            <PrimaryButton label={alpineInstalled ? '重新安装' : '安装 Linux 环境'} icon="download" onPress={installAlpine} disabled={!privileged} block />
+            <PrimaryButton label={alpineInstalled ? '重新安装' : '安装 Linux 环境'} icon="download" onPress={installAlpine} disabled={!linuxAvailable} block />
           )}
         </Card>
 

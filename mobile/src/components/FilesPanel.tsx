@@ -185,6 +185,8 @@ export function FilesPanel({ visible, onClose, control, initialChanges, vmId }: 
   const { top, bottom } = useSafeAreaInsets();
   const [tab, setTab] = useState<Tab>('tree');
   const [privileged, setPrivileged] = useState(false);
+  // 沙箱文件系统能力（PRoot 沙箱可用即显示本地 tab）
+  const [localCapable, setLocalCapable] = useState(false);
   const [path, setPath] = useState('');
   const [entries, setEntries] = useState<RepoFileStatus[] | null>(null);
   const [entriesLoading, setEntriesLoading] = useState(false);
@@ -204,12 +206,16 @@ export function FilesPanel({ visible, onClose, control, initialChanges, vmId }: 
   const uploadAbortRef = useRef<AbortController | null>(null);
   const uploadOperationRef = useRef(0);
 
-  // 特权模式检测：决定是否显示「本地」tab（Root + LSPosed 可用时）
+  // 能力检测：决定是否显示「本地」tab。
+  //  - 提权能力（Root + LSPosed）：完整本地文件系统
+  //  - 沙箱能力（PRoot 沙箱 / 原生模块）：受限本地目录（App 沙箱内）
   useEffect(() => {
-    setPrivileged(permissionDetector.isPrivileged());
-    if (permissionDetector.getState() === null) {
-      permissionDetector.detect().then((st) => setPrivileged(st.mode === 'privileged'));
-    }
+    const st = permissionDetector.getState();
+    const detect = st ? Promise.resolve(st) : permissionDetector.detect();
+    detect.then((s) => {
+      setPrivileged(s.mode === 'privileged');
+      setLocalCapable(s.capabilities.fileSystem || s.capabilities.alpineLinux);
+    });
   }, []);
 
   // 下载文件或目录（目录由后端打包成 zip）：下完再交给系统分享面板。
@@ -451,7 +457,7 @@ export function FilesPanel({ visible, onClose, control, initialChanges, vmId }: 
   const TABS: { key: Tab; label: string; count?: number }[] = [
     { key: 'tree', label: '文件' },
     { key: 'changes', label: '变动', count: changes.length },
-    ...(privileged ? [{ key: 'local' as Tab, label: '本地' }] : []),
+    ...(localCapable ? [{ key: 'local' as Tab, label: '本地' }] : []),
   ];
   const uploadPercent = uploadingFile?.total
     ? Math.max(0, Math.min(100, Math.round((uploadingFile.bytes / uploadingFile.total) * 100)))
@@ -495,7 +501,7 @@ export function FilesPanel({ visible, onClose, control, initialChanges, vmId }: 
 
           {tab === 'local' ? (
             <View style={{ flex: 1, backgroundColor: t.bg }}>
-              <LocalFilesBrowser enabled={privileged} />
+              <LocalFilesBrowser enabled={localCapable} />
             </View>
           ) : tab === 'tree' ? (
             <View style={{ flex: 1 }} pointerEvents={uploadingFile ? 'none' : 'auto'}>

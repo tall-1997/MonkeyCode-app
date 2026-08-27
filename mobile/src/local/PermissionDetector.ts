@@ -104,14 +104,15 @@ class PermissionDetector {
         root: rootInfo as RootInfo,
         lsposed: lsposedInfo as LSPosedInfo,
         capabilities: {
+          // 沙箱能力（PRoot 免 root）：只要原生模块存在即可用
+          alpineLinux: true,
+          fileSystem: true,
           shell: isPrivileged,
           rootShell: isPrivileged && !!rootInfo.available,
-          fileSystem: isPrivileged,
           systemAPI: isPrivileged,
           personalData: isPrivileged,
           guiAgent: isPrivileged,
           systemHook: isPrivileged && lsposedInfo.available,
-          alpineLinux: isPrivileged,
         },
       };
 
@@ -155,14 +156,15 @@ class PermissionDetector {
       root: { available: false, manager: null, version: null },
       lsposed: { available: false, version: null, apiVersion: 0 },
       capabilities: {
+        // PRoot 免 root Linux 沙箱始终可用（Android + 原生模块）
+        alpineLinux: Platform.OS === 'android' && !!PrivilegedExecution,
+        fileSystem: Platform.OS === 'android' && !!PrivilegedExecution,
         shell: false,
         rootShell: false,
-        fileSystem: false,
         systemAPI: false,
         personalData: false,
         guiAgent: false,
         systemHook: false,
-        alpineLinux: false,
       },
     };
   }

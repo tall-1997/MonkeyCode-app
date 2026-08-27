@@ -31,6 +31,21 @@ export default function LocalTerminalScreen() {
   const scrollRef = useRef<ScrollView>(null);
 
   const privileged = permissionDetector.isPrivileged();
+  // PRoot 免 root Linux 沙箱可用性：仅要求 Android + 原生模块
+  const [linuxAvailable, setLinuxAvailable] = React.useState(false);
+  React.useEffect(() => {
+    const st = permissionDetector.getState();
+    const detected = st ?? (async () => permissionDetector.detect())();
+    void Promise.resolve(detected).then((s) => {
+      setLinuxAvailable(s.capabilities.alpineLinux || s.capabilities.fileSystem);
+    });
+  }, []);
+
+  // 命令可执行条件：
+  //  - linux 环境：PRoot 免 root，linuxAvailable 即可
+  //  - android + user：普通 sh，免 root
+  //  - android + root：需提权
+  const canRun = (env === 'linux' && linuxAvailable) || (env === 'android' && (identity === 'user' || privileged));
 
   const leave = useCallback(() => {
     if (!navigation.isFocused()) return;
@@ -40,7 +55,7 @@ export default function LocalTerminalScreen() {
 
   const run = async () => {
     const c = cmd.trim();
-    if (!c || busy) return;
+    if (!c || busy || !canRun) return;
     setCmd('');
     setHistory((h) => [...h, { kind: 'cmd', text: `$ ${c}` }]);
     setBusy(true);
@@ -76,9 +91,13 @@ export default function LocalTerminalScreen() {
       <PrivilegedBanner />
       <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding">
         <ScrollView ref={scrollRef} style={{ flex: 1 }} contentContainerStyle={{ paddingTop: 56, paddingBottom: insets.bottom + 12, paddingHorizontal: 12 }}>
-          {!privileged ? (
+          {!privileged && !linuxAvailable ? (
             <Card style={{ padding: 16, marginTop: 4 }}>
-              <Text style={{ fontSize: 13, color: t.tx2, lineHeight: 20 }}>终端需要特权模式（Root）。当前为沙箱模式，仅可尝试访问受限命令。</Text>
+              <Text style={{ fontSize: 13, color: t.tx2, lineHeight: 20 }}>终端未就绪：Linux 环境未安装，且当前无 Root 权限。请先在「特权能力设置」安装 Linux 工具环境。</Text>
+            </Card>
+          ) : !privileged && env === 'android' && identity === 'root' ? (
+            <Card style={{ padding: 16, marginTop: 4 }}>
+              <Text style={{ fontSize: 13, color: t.tx2, lineHeight: 20 }}>root 身份需要提权。沙箱模式下请使用 Linux 环境（PRoot 免 root）或 user 身份。</Text>
             </Card>
           ) : null}
 
@@ -100,22 +119,26 @@ export default function LocalTerminalScreen() {
         </ScrollView>
 
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12, paddingTop: 6, borderTopWidth: 1, borderColor: 'rgba(255,255,255,0.08)' }}>
-          <Pressable onPress={() => setIdentity((v) => (v === 'root' ? 'user' : 'root'))} disabled={!privileged} style={{ paddingHorizontal: 8, paddingVertical: 6, borderRadius: 8, backgroundColor: identity === 'root' ? t.redGhost : t.bg3, opacity: privileged ? 1 : 0.4 }}>
+          <Pressable
+            onPress={() => setIdentity((v) => (v === 'root' ? 'user' : 'root'))}
+            disabled={env === 'linux' || !privileged}
+            style={{ paddingHorizontal: 8, paddingVertical: 6, borderRadius: 8, backgroundColor: identity === 'root' ? t.redGhost : t.bg3, opacity: env === 'linux' || !privileged ? 0.4 : 1 }}
+          >
             <Text style={{ fontSize: 12, fontWeight: '700', color: identity === 'root' ? t.red : t.tx2 }}>#{identity === 'root' ? 'root' : 'user'}</Text>
           </Pressable>
           <TextInput
             value={cmd}
             onChangeText={setCmd}
-            placeholder={privileged ? '$ 输入命令' : '终端不可用'}
+            placeholder={canRun ? '$ 输入命令' : '终端不可用'}
             placeholderTextColor={t.tx3}
-            editable={privileged && !busy}
+            editable={canRun && !busy}
             onSubmitEditing={() => void run()}
             autoCapitalize="none"
             autoCorrect={false}
             style={{ flex: 1, height: 42, borderRadius: 10, paddingHorizontal: 12, backgroundColor: t.bg3, color: t.termTx, fontFamily: 'monospace' }}
           />
-          <Pressable onPress={() => void run()} disabled={!privileged || busy} style={({ }) => ({ width: 42, height: 42, borderRadius: 12, backgroundColor: privileged ? t.ac : t.bg3, alignItems: 'center', justifyContent: 'center', opacity: privileged ? 1 : 0.4 })}>
-            <Icons.send size={18} color={privileged ? t.acInk : t.tx3} sw={2.2} />
+          <Pressable onPress={() => void run()} disabled={!canRun || busy} style={({ }) => ({ width: 42, height: 42, borderRadius: 12, backgroundColor: canRun ? t.ac : t.bg3, alignItems: 'center', justifyContent: 'center', opacity: canRun ? 1 : 0.4 })}>
+            <Icons.send size={18} color={canRun ? t.acInk : t.tx3} sw={2.2} />
           </Pressable>
         </View>
       </KeyboardAvoidingView>
