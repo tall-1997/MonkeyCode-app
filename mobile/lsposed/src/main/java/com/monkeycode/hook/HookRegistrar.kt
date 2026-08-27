@@ -38,7 +38,11 @@ internal object Reflect {
         return try { Class.forName(name, false, loader) } catch (e: Throwable) { null }
     }
 
-    fun tryMethod(cls: Class<*>, name: String, vararg params: Class<*>): java.lang.reflect.Method? {
-        return try { cls.getDeclaredMethod(name, *params) } catch (e: Throwable) { null }
+    /** 反射查找方法，params 允许为 null（ROM 差异缺失类）；null 参数被过滤。 */
+    fun tryMethod(cls: Class<*>, name: String, vararg params: Class<*>?): java.lang.reflect.Method? {
+        return try {
+            val filtered = params.filterNotNull().toTypedArray()
+            cls.getDeclaredMethod(name, *filtered)
+        } catch (e: Throwable) { null }
     }
 }
