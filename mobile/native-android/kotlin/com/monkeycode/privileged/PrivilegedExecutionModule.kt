@@ -372,20 +372,31 @@ class PrivilegedExecutionModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun installAlpineEnvironment(promise: Promise) {
-        Thread {
+        // 后台线程安装：任何 Throwable（含 Error）都要转成 promise.reject，避免未捕获崩溃闪退
+        val t = Thread {
             try {
                 alpineEnvironment.install { progress ->
-                    sendEvent("alpineInstallProgress", Arguments.createMap().apply {
+                    safeSendEvent("alpineInstallProgress", Arguments.createMap().apply {
                         putDouble("progress", progress.toDouble())
                     })
                 }
                 val result = Arguments.createMap()
                 result.putBoolean("success", true)
                 promise.resolve(result)
-            } catch (e: Exception) {
-                promise.reject("ALPINE_INSTALL_ERROR", e.message)
+            } catch (e: Throwable) {
+                try { promise.reject("ALPINE_INSTALL_ERROR", safeMessage(e)) }
+                catch (e2: Throwable) { android.util.Log.e("MonkeyCode", "install reject failed", e2) }
             }
-        }.start()
+        }
+        t.setUncaughtExceptionHandler { thread, throwable ->
+            android.util.Log.e("MonkeyCode", "Alpine install crashed", throwable)
+        }
+        t.start()
+    }
+
+    /** 把任意 Throwable 转成可安全写入 promise 的错误消息。 */
+    private fun safeMessage(e: Throwable): String {
+        return e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
     }
 
     @ReactMethod
@@ -531,11 +542,23 @@ class PrivilegedExecutionModule(reactContext: ReactApplicationContext) :
     // ==================== Event Helpers ====================
 
     fun sendEvent(eventName: String, params: WritableMap) {
-        // RN 要求 JS 事件模块在主线程发射；后台线程调用会崩溃导致白屏。
-        reactApplicationContext.runOnUiQueueThread {
-            reactApplicationContext
-                .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
-                .emit(eventName, params)
+        // RN 要求 JS 事件模块在主线程发射；后台线程调用会崩溃致白屏。
+        safeSendEvent(eventName, params)
+    }
+
+    fun safeSendEvent(eventName: String, params: WritableMap) {
+        try {
+            reactApplicationContext.runOnUiQueueThread {
+                try {
+                    reactApplicationContext
+                        .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                        .emit(eventName, params)
+                } catch (e: Throwable) {
+                    android.util.Log.e("MonkeyCode", "emit $eventName failed", e)
+                }
+            }
+        } catch (e: Throwable) {
+            android.util.Log.w("MonkeyCode", "queue emit $eventName failed", e)
         }
     }
 
