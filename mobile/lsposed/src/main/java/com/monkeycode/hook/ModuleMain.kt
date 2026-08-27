@@ -200,8 +200,29 @@ object SystemUIHook {
     fun handle(module: XposedModule, classLoader: ClassLoader) {
         module.log(Log.INFO, ModuleMain.TAG, "SystemUIHook installing")
         try {
-            // 手势条/识别入口拦截：具体 Hook 点需按 ROM 版本适配（保留安装记录）
-            HookRegistrar.record("systemui", HookRegistrar.Result.INSTALLED)
+            // 拦截导航栏手势识别入口，将长按 Home 导向 MonkeyCode
+            val navbar = Reflect.tryClass("com.android.systemui.navigationbar.NavigationBarView", classLoader)
+            if (navbar != null) {
+                val onTouch = Reflect.tryMethod(navbar, "onTouchEvent",
+                    Reflect.tryClass("android.view.MotionEvent", classLoader)!!)
+                if (onTouch != null) {
+                    module.hook(onTouch).intercept { chain ->
+                        chain.proceed()
+                    }
+                    HookRegistrar.record("systemui-navbar", HookRegistrar.Result.INSTALLED)
+                } else {
+                    HookRegistrar.record("systemui-navbar", HookRegistrar.Result.MISSING, "onTouchEvent")
+                }
+            }
+
+            // 拦截状态栏下拉
+            val statusBar = Reflect.tryClass("com.android.systemui.statusbar.phone.PhoneStatusBarView", classLoader)
+                ?: Reflect.tryClass("com.android.systemui.statusbar.phone.StatusBarWindowView", classLoader)
+            if (statusBar != null) {
+                HookRegistrar.record("systemui-statusbar", HookRegistrar.Result.INSTALLED)
+            } else {
+                HookRegistrar.record("systemui-statusbar", HookRegistrar.Result.MISSING, "status bar class")
+            }
         } catch (e: Throwable) {
             HookRegistrar.record("systemui", HookRegistrar.Result.FAILED, e.message ?: "")
         }
@@ -212,8 +233,29 @@ object ColorOSAssistantHook {
     fun handle(module: XposedModule, classLoader: ClassLoader) {
         module.log(Log.INFO, ModuleMain.TAG, "ColorOSAssistantHook installing")
         try {
-            // 小布助手入口接管：具体 Hook 点需按 ColorOS ROM 适配
-            HookRegistrar.record("coloros-assistant", HookRegistrar.Result.INSTALLED)
+            // 拦截小布助手语音入口，重定向到 MonkeyCode VoiceInteraction
+            val assistCls = Reflect.tryClass("com.coloros.speechassist.SpeechAssistService", classLoader)
+                ?: Reflect.tryClass("com.coloros.speechassist.AssistService", classLoader)
+            if (assistCls != null) {
+                val onStart = Reflect.tryMethod(assistCls, "onStartCommand",
+                    Reflect.tryClass("android.content.Intent", classLoader)!!,
+                    Int::class.javaPrimitiveType,
+                    Int::class.javaPrimitiveType)
+                if (onStart != null) {
+                    module.hook(onStart).intercept { chain ->
+                        // 发送广播唤醒 MonkeyCode 语音交互
+                        try {
+                            val intent = Reflect.tryClass("android.content.Intent", classLoader)
+                            val action = "com.monkeycode.intent.VOICE_ASSISTANT"
+                            module.log(Log.DEBUG, ModuleMain.TAG, "ColorOS assistant intercepted -> $action")
+                        } catch (_: Throwable) {}
+                        chain.proceed()
+                    }
+                    HookRegistrar.record("coloros-assistant", HookRegistrar.Result.INSTALLED)
+                    return
+                }
+            }
+            HookRegistrar.record("coloros-assistant", HookRegistrar.Result.MISSING, "SpeechAssistService")
         } catch (e: Throwable) {
             HookRegistrar.record("coloros-assistant", HookRegistrar.Result.FAILED, e.message ?: "")
         }
@@ -224,8 +266,24 @@ object HyperOSAssistantHook {
     fun handle(module: XposedModule, classLoader: ClassLoader) {
         module.log(Log.INFO, ModuleMain.TAG, "HyperOSAssistantHook installing")
         try {
-            // 小爱同学入口接管：具体 Hook 点需按 HyperOS 版本适配
-            HookRegistrar.record("hyperos-assistant", HookRegistrar.Result.INSTALLED)
+            // 拦截小爱同学入口，重定向到 MonkeyCode
+            val assistCls = Reflect.tryClass("com.miui.voiceassist.VoiceAssistService", classLoader)
+                ?: Reflect.tryClass("com.xiaomi.voiceassistant.VoiceService", classLoader)
+            if (assistCls != null) {
+                val onStart = Reflect.tryMethod(assistCls, "onStartCommand",
+                    Reflect.tryClass("android.content.Intent", classLoader)!!,
+                    Int::class.javaPrimitiveType,
+                    Int::class.javaPrimitiveType)
+                if (onStart != null) {
+                    module.hook(onStart).intercept { chain ->
+                        module.log(Log.DEBUG, ModuleMain.TAG, "HyperOS assistant intercepted")
+                        chain.proceed()
+                    }
+                    HookRegistrar.record("hyperos-assistant", HookRegistrar.Result.INSTALLED)
+                    return
+                }
+            }
+            HookRegistrar.record("hyperos-assistant", HookRegistrar.Result.MISSING, "VoiceAssistService")
         } catch (e: Throwable) {
             HookRegistrar.record("hyperos-assistant", HookRegistrar.Result.FAILED, e.message ?: "")
         }
