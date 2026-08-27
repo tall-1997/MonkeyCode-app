@@ -136,7 +136,7 @@ class SessionManager(private val context: Context) {
                         meta.status = SessionStatus.RUNNING
                         meta.updatedAt = System.currentTimeMillis()
                         sessions[meta.id] = meta
-                        journalWriters[meta.id] = ReentrantReadWriteLock()
+                        journalWriters[meta.id] = Any()
                         writeMeta(meta)
                         return meta
                     }
