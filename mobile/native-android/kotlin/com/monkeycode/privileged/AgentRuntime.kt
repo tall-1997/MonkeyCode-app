@@ -148,6 +148,9 @@ class AgentRuntime(private val context: Context) {
                 })
             })
         }
+        fun addToolObject(obj: JSONObject) {
+            tools.add(obj)
+        }
         fun build(): JSONArray = JSONArray(tools)
         fun size(): Int = tools.size
     }
@@ -776,7 +779,7 @@ class AgentRuntime(private val context: Context) {
             "toggle_bluetooth", "开关蓝牙", objParams(mapOf("enable" to JSONObject().apply { put("type", "boolean"); put("description", "开启或关闭") })))
 
         if (all || toolNames.contains("spawn_agent")) {
-            catalog.tools.add(SubagentManager.buildSpawnToolSchema())
+            catalog.addToolObject(SubagentManager.buildSpawnToolSchema())
         }
 
         mcpClient?.let { mc ->
