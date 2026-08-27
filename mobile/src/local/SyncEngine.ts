@@ -138,7 +138,10 @@ class SyncEngine {
 
   private async processEntry(entry: SyncQueueEntry): Promise<void> {
     const payload = typeof entry.payload === 'string' ? JSON.parse(entry.payload as string) : entry.payload;
-    const body = JSON.stringify({ entityType: entry.entityType, entityId: entry.entityId, action: entry.action, payload });
+    // 协议字段与后端 domain/sync.go 对齐（snake_case）
+    const body = JSON.stringify({
+      changes: [{ entity_type: entry.entityType, entity_id: entry.entityId, action: entry.action, payload }],
+    });
     await request(`/api/v1/sync/push`, {
       method: 'POST',
       body,
@@ -150,7 +153,7 @@ class SyncEngine {
       const lastSyncTime = await this.getLastSyncTime();
       const data = await request(`/api/v1/sync/pull`, {
         method: 'POST',
-        body: JSON.stringify({ lastSyncTime }),
+        body: JSON.stringify({ last_sync_time: lastSyncTime }),
       }) as any;
       if (data.changes) {
         const db = await getDatabase();
@@ -160,14 +163,16 @@ class SyncEngine {
         }
       }
 
-      await this.setLastSyncTime(Date.now());
+      await this.setLastSyncTime(data.last_sync_time ?? Date.now());
     } catch (e: any) {
       // 拉取失败不影响上传结果
     }
   }
 
   private async applyRemoteChange(db: any, change: any): Promise<void> {
-    const { entityType, entityId, action, payload } = change;
+    const { entity_type, entity_id, action, payload } = change;
+    const entityType = entity_type;
+    const entityId = entity_id;
     switch (action) {
       case 'update':
       case 'create':
