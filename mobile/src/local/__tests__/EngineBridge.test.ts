@@ -13,9 +13,9 @@ const mockPrivileged = {
 jest.doMock('react-native', () => ({
   Platform: { OS: 'android' },
   NativeModules: { PrivilegedExecution: mockPrivileged },
-  NativeEventEmitter: jest.fn().mockImplementation(() => ({
-    addListener: jest.fn(),
-  })),
+  DeviceEventEmitter: {
+    addListener: jest.fn(() => ({ remove: jest.fn() })),
+  },
 }));
 
 jest.doMock('@/local/PermissionDetector', () => ({

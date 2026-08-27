@@ -21,6 +21,24 @@ class PrivilegedExecutionModule(reactContext: ReactApplicationContext) :
 
     override fun getName(): String = "PrivilegedExecution"
 
+    init {
+        // 接线 RootShellManager 会话输出/退出回调 → 全局事件（配合 JS 端 DeviceEventEmitter）
+        rootShellManager.onSessionData = { sessionId: String, data: String ->
+            sessionDataCallbacks[sessionId]?.invoke(data)
+            safeSendEvent("shellData", Arguments.createMap().apply {
+                putString("sessionId", sessionId)
+                putString("data", data)
+            })
+        }
+        rootShellManager.onSessionExit = { sessionId: String, exitCode: Int ->
+            sessionExitCallbacks[sessionId]?.invoke(exitCode)
+            safeSendEvent("shellExit", Arguments.createMap().apply {
+                putString("sessionId", sessionId)
+                putInt("exitCode", exitCode)
+            })
+        }
+    }
+
     // ==================== Permission Detection ====================
 
     @ReactMethod
@@ -456,6 +474,8 @@ class PrivilegedExecutionModule(reactContext: ReactApplicationContext) :
                 contextWindow = model.optInt("contextWindow", 128000),
                 maxOutput = model.optInt("maxOutput", 32768),
                 thinking = model.optJSONObject("thinking")?.optBoolean("enabled", false) ?: false,
+                interfaceType = model.optString("interfaceType")
+                    .ifBlank { cfg.optString("interfaceType") }.ifBlank { "openai_chat" },
                 systemPrompt = cfg.optString("systemPrompt", ""),
                 initialInput = cfg.optString("initialInput", ""),
                 skills = emptyList(),

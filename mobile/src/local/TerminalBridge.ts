@@ -1,4 +1,4 @@
-import { NativeModules, Platform, NativeEventEmitter } from 'react-native';
+import { NativeModules, DeviceEventEmitter } from 'react-native';
 import { permissionDetector, ShellResult } from './PermissionDetector';
 
 const { PrivilegedExecution } = NativeModules;
@@ -14,16 +14,19 @@ class TerminalBridge {
   private sessions: Map<string, TerminalSession> = new Map();
   private dataListeners: Map<string, Array<(data: string) => void>> = new Map();
   private exitListeners: Map<string, Array<(exitCode: number) => void>> = new Map();
-  private emitter: NativeEventEmitter | null = null;
+  private _dataSub: { remove: () => void } | null = null;
+  private _exitSub: { remove: () => void } | null = null;
 
   constructor() {
-    if (Platform.OS === 'android' && PrivilegedExecution) {
-      this.emitter = new NativeEventEmitter(PrivilegedExecution);
-      this.emitter.addListener('shellData', (event: { sessionId: string; data: string }) => {
+    // native 端用 RCTDeviceEventEmitter 全局发射，JS 端用全局 DeviceEventEmitter 接收；
+    // 不要 new NativeEventEmitter(legacy NativeModule) —— TurboModule 新架构要求 addListener，
+    // legacy 模块不支持 → 构造抛异常导致闪退。
+    if (PrivilegedExecution) {
+      this._dataSub = DeviceEventEmitter.addListener('shellData', (event: { sessionId: string; data: string }) => {
         const listeners = this.dataListeners.get(event.sessionId);
         listeners?.forEach((l) => l(event.data));
       });
-      this.emitter.addListener('shellExit', (event: { sessionId: string; exitCode: number }) => {
+      this._exitSub = DeviceEventEmitter.addListener('shellExit', (event: { sessionId: string; exitCode: number }) => {
         const listeners = this.exitListeners.get(event.sessionId);
         listeners?.forEach((l) => l(event.exitCode));
         this.sessions.delete(event.sessionId);

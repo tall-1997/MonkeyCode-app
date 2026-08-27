@@ -369,3 +369,33 @@
 - manifest service 序列化结构、Kotlin 编译错误、前后端同步协议 snake_case 对齐
 
 **阻塞项**：任务 32/36/40/41 需要 agent submodule 源码（指向 chaitin/OhMyAgent，不可访问）或真实 Root 设备，已标注原因与就绪路径。
+
+## 实施记录（2026-08-27 · 追加：云端模型复用为本地 Agent）
+
+**已完成**：本地 Agent 复用云端模型（自研 Kotlin AgentRuntime 直接走模型 API，本地使用不做限制）。
+
+| 项 | 交付物 |
+|----|--------|
+| 协议适配 (AgentRuntime.kt) | `callLLM` 按 `interfaceType` 分派三协议：`openai_chat`→`/v1/chat/completions`、`openai_responses`→`/v1/responses`（input 投影 + 归一化为 chat 形状）、`anthropic`→`/v1/messages`（x-api-key + anthropic-version 头，system 折叠为文本）；端点容忍 baseUrl 已带 `/v1` 或 `/chat/completions` |
+| native 解析 | `PrivilegedExecutionModule.startAgent` 读取 `modelConfig.interfaceType`（模型配置 → 配置顶层 → 默认 `openai_chat`） |
+| TS 适配器 (agentBackend.ts) | `loadAgentModels()` 由 `listModels` 生成可选模型：私有模型（含 base_url/api_key/interface_type）直连，云端会员模型走平台网关（openai_chat 兼容端点）；`buildEngineConfig` 始终携带 interfaceType |
+| UI (local-agent.tsx) | 本地 Agent 会话页：模型 PickerSheet + 任务输入 + 引擎帧流（assistant 文本块/工具调用/工具结果/引擎状态），已注册路由并加入 profile 入口 |
+| 入口融合 | 底部 `+` 号改为选择弹层：云端·新建任务 / 本地·新建项目（local-project-create） |
+
+**验证**：`npx tsc --noEmit` 通过；Kotlin stub 编译相对基线错误数不变（185 条为 stub 缺 android.jar 固有，本轮未新增）。
+**待办**：真机验证三协议调用；待后续闪退修复（安装 Linux 白屏/点击闪退）后构建验证。
+
+## 实施记录（2026-08-27 · 追加二：闪退隐患全量清理）
+
+**背景**：commit 6c5ac27 只修复了 `privileged-settings.tsx` 的 NativeEventEmitter 崩溃（TanTurboModule 新架构下 legacy NativeModule 不支持 addListener → 构造抛异常）。
+
+**全量清理**（`grep NativeEventEmitter` 定位全部隐患）：
+
+| 文件 | 修复 |
+|------|------|
+| src/local/EngineBridge.ts | 改用全局 `DeviceEventEmitter` 接收 `engineFrame`/`engineStatus`（native 端已用 RCTDeviceEventEmitter 发射）；新增 `normalizeFrameData` 解析 native 以字符串发送的 data 字段；测试 mock 同步更新 |
+| src/local/TerminalBridge.ts | 改用全局 `DeviceEventEmitter` 接收 `shellData`/`shellExit`，移除 NativeEventEmitter 构造 |
+| src/local/FileSystemBridge.ts | 移除未使用的 NativeEventEmitter/Platform 导入 |
+| PrivilegedExecutionModule.kt | **根因补齐**：`RootShellManager.onSessionData/onSessionExit` 从未接线 → `sessionDataCallbacks` 从未写入 → 终端输出流从未到达 JS；init 块接线为发射 `shellData`/`shellExit` 全局事件 |
+
+**验证**：`npx tsc --noEmit` 通过；jest 43/43 通过；Kotlin stub 编译错误数（含 RootShellManager 源码）与基线一致（新增为 stub 缺 RN bridge 类型的固有限制）。

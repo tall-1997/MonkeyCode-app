@@ -1,4 +1,4 @@
-import { NativeModules, Platform, NativeEventEmitter } from 'react-native';
+import { NativeModules } from 'react-native';
 import { permissionDetector, FileEntry, FileInfo } from './PermissionDetector';
 import * as ExpoFileSystem from 'expo-file-system';
 

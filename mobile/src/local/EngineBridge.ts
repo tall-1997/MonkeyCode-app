@@ -1,4 +1,4 @@
-import { NativeModules, Platform, NativeEventEmitter } from 'react-native';
+import { DeviceEventEmitter, NativeModules } from 'react-native';
 import { permissionDetector } from './PermissionDetector';
 
 const { PrivilegedExecution } = NativeModules;
@@ -39,15 +39,26 @@ class EngineBridge {
   private statusListeners: Array<(status: EngineStatus) => void> = [];
   private errorListeners: Array<(error: { code: string; message: string; recoverable: boolean }) => void> = [];
   private retryCount: number = 0;
-  private emitter: NativeEventEmitter | null = null;
+  private _frameSub: { remove: () => void } | null = null;
+  private _statusSub: { remove: () => void } | null = null;
 
   constructor() {
-    if (Platform.OS === 'android' && PrivilegedExecution) {
-      this.emitter = new NativeEventEmitter(PrivilegedExecution);
-      this.emitter.addListener('engineFrame', (frame: EngineFrame) => {
+    // native 端用 RCTDeviceEventEmitter 全局发射，JS 端必须用全局 DeviceEventEmitter 接收；
+    // 不能 new NativeEventEmitter(legacy NativeModule)：TurboModule（新架构）要求 addListener，
+    // legacy 模块不支持 → 构造抛异常导致闪退（回 6c5ac27 修复）。
+    if (PrivilegedExecution) {
+      this._frameSub = DeviceEventEmitter.addListener('engineFrame', (raw: EngineFrame) => {
+        // native 侧以字符串发送 data 字段，此处归一化为对象，供 UI 直接访问
+        const frame: EngineFrame = {
+          type: raw.type,
+          kind: raw.kind,
+          timestamp: raw.timestamp,
+          seq: raw.seq,
+          data: raw.data === null || raw.data === undefined ? undefined : normalizeFrameData(raw.data),
+        };
         this.frameListeners.forEach((l) => l(frame));
       });
-      this.emitter.addListener('engineStatus', (status: EngineStatus) => {
+      this._statusSub = DeviceEventEmitter.addListener('engineStatus', (status: EngineStatus) => {
         this.status = status;
         this.statusListeners.forEach((l) => l(status));
       });
@@ -162,4 +173,16 @@ class EngineBridge {
 }
 
 export const engineBridge = new EngineBridge();
+
+/** native 侧 data 可能是 JSON 字符串（应被解析）或已反序列化的对象 */
+function normalizeFrameData(data: any): any {
+  if (typeof data === 'string') {
+    try {
+      return JSON.parse(data);
+    } catch {
+      return data;
+    }
+  }
+  return data;
+}
 export default EngineBridge;

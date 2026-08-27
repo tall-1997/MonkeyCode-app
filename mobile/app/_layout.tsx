@@ -61,6 +61,7 @@ function RootNav() {
       <Stack.Screen name="local-project-create" />
       <Stack.Screen name="local-terminal" />
       <Stack.Screen name="local-repo" />
+      <Stack.Screen name="local-agent" />
     </Stack>
   );
 }

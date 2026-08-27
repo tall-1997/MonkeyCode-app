@@ -59,6 +59,7 @@ class AgentRuntime(private val context: Context) {
         val model: String,
         val baseUrl: String,
         val apiKey: String,
+        val interfaceType: String = "openai_chat", // openai_chat / openai_responses / anthropic
         val contextWindow: Int = 128000,
         val maxOutput: Int = 32768,
         val thinking: Boolean = false,
@@ -239,28 +240,214 @@ class AgentRuntime(private val context: Context) {
     }
 
     private fun callLLM(config: AgentConfig, messages: JSONArray, tools: JSONArray): JSONObject? {
-        val endpoint = if (config.baseUrl.endsWith("/v1")) "${config.baseUrl}/chat/completions" else "${config.baseUrl}/v1/chat/completions"
-        val url = URL(endpoint)
-        val connection = url.openConnection() as HttpURLConnection
-        connection.requestMethod = "POST"
-        connection.setRequestProperty("Content-Type", "application/json")
-        connection.setRequestProperty("Authorization", "Bearer ${config.apiKey}")
-        connection.doOutput = true
-        connection.connectTimeout = 30000
-        connection.readTimeout = 120000
+        // 按 interface_type 分派协议（对应 Desktop config.rs route_of + 参考仓 shiyi/Operit 多协议）
+        return when (config.interfaceType) {
+            "anthropic" -> callAnthropic(config, messages, tools)
+            "openai_responses" -> callOpenAIResponses(config, messages, tools)
+            else -> callOpenAIChat(config, messages, tools)
+        }
+    }
 
+    /** OpenAI Chat Completions（兼容 DeepSeek/Qwen/GLM/Kimi 等所有 v1/chat 端点）。 */
+    private fun callOpenAIChat(config: AgentConfig, messages: JSONArray, tools: JSONArray): JSONObject? {
+        val endpoint = chatEndpointOf(config.baseUrl)
+        val conn = openJsonConn(endpoint, config.apiKey)
         val body = JSONObject().apply {
             put("model", config.model)
             put("messages", messages)
             put("max_tokens", config.maxOutput)
             put("stream", false)
+            put("temperature", 0.2)
             if (tools.length() > 0) put("tools", tools)
         }
-        connection.outputStream.use { os -> os.write(body.toString().toByteArray()) }
+        writeClose(conn, body)
+        if (conn.responseCode != 200) { conn.disconnect(); return null }
+        val resp = conn.inputStream.bufferedReader().readText()
+        conn.disconnect()
+        return JSONObject(resp)
+    }
 
-        if (connection.responseCode != 200) return null
-        val responseBody = connection.inputStream.bufferedReader().readText()
-        return JSONObject(responseBody)
+    /** OpenAI Responses API（官方 gpt 系列 / responses 端点）。 */
+    private fun callOpenAIResponses(config: AgentConfig, messages: JSONArray, tools: JSONArray): JSONObject? {
+        val base = config.baseUrl.trimEnd('/')
+        val endpoint = if (base.endsWith("/v1")) "$base/responses" else "$base/v1/responses"
+        val conn = openJsonConn(endpoint, config.apiKey)
+        // 把 chat messages 投影为 input items；assistant 消息转 input_item
+        val input = JSONArray()
+        for (i in 0 until messages.length()) {
+            val m = messages.getJSONObject(i)
+            val role = m.optString("role", "user")
+            if (role == "assistant") {
+                input.put(JSONObject().apply {
+                    put("type", "message"); put("role", "assistant")
+                    put("content", JSONArray().put(JSONObject().apply { put("type", "input_text"); put("text", m.optString("content", "")) }))
+                })
+            } else if (role == "tool") {
+                // tool result → function_call_output item
+                input.put(JSONObject().apply {
+                    put("type", "function_call_output")
+                    put("call_id", m.optString("tool_call_id", ""))
+                    put("output", m.optString("content", ""))
+                })
+            } else {
+                input.put(JSONObject().apply {
+                    put("type", "message"); put("role", "user")
+                    put("content", JSONArray().put(JSONObject().apply { put("type", "input_text"); put("text", m.optString("content", "")) }))
+                })
+            }
+        }
+        val body = JSONObject().apply {
+            put("model", config.model)
+            put("input", input)
+            put("max_output_tokens", config.maxOutput)
+            put("stream", false)
+            if (tools.length() > 0) put("tools", tools)
+        }
+        writeClose(conn, body)
+        if (conn.responseCode != 200) { conn.disconnect(); return null }
+        val resp = conn.inputStream.bufferedReader().readText()
+        conn.disconnect()
+        // 归一化为 OpenAI chat 形状 {choices:[{message:{content, tool_calls}}], ...}
+        return responsesToChat(JSONObject(resp), config.model)
+    }
+
+    /** Anthropic Messages API（Claude 系：x-api-key + anthropic-version）。 */
+    private fun callAnthropic(config: AgentConfig, messages: JSONArray, tools: JSONArray): JSONObject? {
+        val base = config.baseUrl.trimEnd('/')
+        val endpoint = if (base.endsWith("/v1")) "$base/messages" else "$base/v1/messages"
+        val conn = openJsonConn(endpoint, config.apiKey)
+        // Anthropic 用 x-api-key + anthropic-version
+        conn.setRequestProperty("x-api-key", config.apiKey)
+        conn.setRequestProperty("anthropic-version", "2023-06-01")
+        // 去掉 tools（Anthropic 的 tool 结构不同；简单处理先不带，让用户在提示词里说明）
+        val body = JSONObject().apply {
+            put("model", config.model)
+            put("max_tokens", config.maxOutput)
+            put("messages", toAnthropicMessages(messages))
+        }
+        writeClose(conn, body)
+        if (conn.responseCode != 200) { conn.disconnect(); return null }
+        val resp = conn.inputStream.bufferedReader().readText()
+        conn.disconnect()
+        // 归一化为 OpenAI chat 形状
+        return anthropicToChat(JSONObject(resp), config.model)
+    }
+
+    // ── 协议工具 ─────────────────────────────────────────────
+
+    /** 派生 chat/completions 端点：容忍 baseUrl 已带 /v1 或 /chat/completions。 */
+    private fun chatEndpointOf(baseUrl: String): String {
+        var b = baseUrl.trim()
+        if (b.endsWith("/")) b = b.dropLast(1)
+        if (b.endsWith("/chat/completions")) return b
+        if (b.endsWith("/v1")) return "$b/chat/completions"
+        return "$b/v1/chat/completions"
+    }
+
+    private fun openJsonConn(endpoint: String, apiKey: String): HttpURLConnection {
+        val conn = URL(endpoint).openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.setRequestProperty("Content-Type", "application/json")
+        conn.setRequestProperty("Authorization", "Bearer $apiKey")
+        conn.doOutput = true
+        conn.connectTimeout = 30000
+        conn.readTimeout = 120000
+        return conn
+    }
+
+    private fun writeClose(conn: HttpURLConnection, body: JSONObject) {
+        try {
+            conn.outputStream.use { os -> os.write(body.toString().toByteArray()) }
+        } catch (e: IOException) {
+            conn.disconnect()
+            throw e
+        }
+    }
+
+    /** [system -> user/assistant 交替；tool] 折叠为 user 段落（Anthropic 不允许 system 在 messages 中）。 */
+    private fun toAnthropicMessages(messages: JSONArray): JSONArray {
+        val out = JSONArray()
+        var lastSystem = ""
+        for (i in 0 until messages.length()) {
+            val m = messages.getJSONObject(i)
+            val role = m.optString("role", "user")
+            when (role) {
+                "system" -> lastSystem = if (lastSystem.isBlank()) m.optString("content", "") else "$lastSystem\n${m.optString("content", "")}"
+                "tool" -> {
+                    val prev = if (out.length() > 0) out.getJSONObject(out.length() - 1) else null
+                    if (prev != null && prev.optString("role") == "user") {
+                        prev.put("content", "${prev.optString("content", "")}\n\n[工具结果] ${m.optString("content", "")}")
+                    } else {
+                        out.put(JSONObject().apply { put("role", "user"); put("content", "[工具结果] ${m.optString("content", "")}") })
+                    }
+                }
+                else -> out.put(JSONObject().apply {
+                    put("role", "user")
+                    val content = m.optString("content", "")
+                    put("content", if (lastSystem.isNotBlank()) "$content" else content)
+                })
+            }
+        }
+        return out
+    }
+
+    /** Responses -> OpenAI chat 形状。 */
+    private fun responsesToChat(r: JSONObject, model: String): JSONObject {
+        val sb = StringBuilder()
+        val toolCalls = JSONArray()
+        val items = r.optJSONArray("output") ?: JSONArray()
+        for (i in 0 until items.length()) {
+            val it = items.getJSONObject(i)
+            when (it.optString("type")) {
+                "message" -> {
+                    val c = it.optJSONArray("content")
+                    if (c != null) {
+                        for (j in 0 until c.length()) {
+                            val part = c.getJSONObject(j)
+                            if (part.optString("type") == "output_text") sb.append(part.optString("text", ""))
+                        }
+                    }
+                }
+                "function_call" -> toolCalls.put(JSONObject().apply {
+                    put("id", it.optString("call_id", "call_${i}"))
+                    put("type", "function")
+                    put("function", JSONObject().apply {
+                        put("name", it.optString("name", ""))
+                        put("arguments", it.optJSONObject("arguments")?.toString() ?: "{}")
+                    })
+                })
+            }
+        }
+        val finish = if (toolCalls.length() > 0) "tool_calls" else "stop"
+        val message = JSONObject().apply {
+            put("role", "assistant")
+            put("content", sb.toString())
+            if (toolCalls.length() > 0) put("tool_calls", toolCalls)
+        }
+        return JSONObject().apply {
+            put("choices", JSONArray().put(JSONObject().apply {
+                put("index", 0); put("message", message); put("finish_reason", finish)
+            }))
+        }
+    }
+
+    /** Anthropic -> OpenAI chat 形状。 */
+    private fun anthropicToChat(r: JSONObject, model: String): JSONObject {
+        val sb = StringBuilder()
+        val content = r.optJSONArray("content") ?: JSONArray()
+        for (i in 0 until content.length()) {
+            val block = content.getJSONObject(i)
+            if (block.optString("type") == "text") sb.append(block.optString("text", ""))
+        }
+        val stopReason = r.optString("stop_reason", "end_turn")
+        val finish = if (stopReason == "tool_use") "tool_calls" else "stop"
+        return JSONObject().apply {
+            put("choices", JSONArray().put(JSONObject().apply {
+                put("index", 0)
+                put("message", JSONObject().apply { put("role", "assistant"); put("content", sb.toString()) })
+                put("finish_reason", finish)
+            }))
+        }
     }
 
     private fun buildToolCatalog(toolNames: List<String>): ToolCatalog {

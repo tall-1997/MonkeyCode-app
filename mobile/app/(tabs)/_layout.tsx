@@ -5,6 +5,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AiConsentModal, useAiConsent } from '@/components/AiConsent';
 import { Glass } from '@/components/glass';
 import { Icons } from '@/components/Icons';
+import { PickerSheet, type PickerOption } from '@/components/ui';
 import { useTheme } from '@/theme';
 
 const TAB_META: Record<string, { label: string; icon: string }> = {
@@ -13,10 +14,16 @@ const TAB_META: Record<string, { label: string; icon: string }> = {
   profile: { label: '我的', icon: 'user' },
 };
 
+const CREATE_OPTIONS: PickerOption[] = [
+  { key: 'cloud', title: '云端 · 新建任务', sub: '由云端 AI 在远程仓执行', icon: 'sparkle' },
+  { key: 'local', title: '本地 · 新建项目', sub: '在设备上创建/克隆项目', icon: 'folder' },
+];
+
 function GlassDock({ state, navigation }: { state: any; navigation: any }) {
   const t = useTheme();
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const [createOpen, setCreateOpen] = useState(false);
   return (
     <View pointerEvents="box-none" style={{ position: 'absolute', left: 0, right: 0, bottom: insets.bottom + 8, alignItems: 'center' }}>
       <Glass radius={30} shadow border style={{ flexDirection: 'row', alignItems: 'center', gap: 5, padding: 7 }}>
@@ -39,14 +46,24 @@ function GlassDock({ state, navigation }: { state: any; navigation: any }) {
             </Pressable>
           );
         })}
-        {/* <View style={{ width: 1, height: 28, backgroundColor: t.line2, marginHorizontal: 3 }} /> */}
         <Pressable
-          onPress={() => router.push('/new-task')}
+          onPress={() => setCreateOpen(true)}
           style={({ pressed }) => [{ width: 47, height: 47, borderRadius: 99, alignItems: 'center', justifyContent: 'center', backgroundColor: t.ac }, pressed && { transform: [{ scale: 0.9 }] }]}
         >
           <Icons.plus size={24} color={t.acInk} sw={2.4} />
         </Pressable>
       </Glass>
+      <PickerSheet
+        title="新建"
+        visible={createOpen}
+        options={CREATE_OPTIONS}
+        onPick={(key) => {
+          setCreateOpen(false);
+          if (key === 'local') router.push('/local-project-create');
+          else router.push('/new-task');
+        }}
+        onClose={() => setCreateOpen(false)}
+      />
     </View>
   );
 }
