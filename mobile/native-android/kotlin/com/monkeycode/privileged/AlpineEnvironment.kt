@@ -55,7 +55,13 @@ class AlpineEnvironment(private val context: Context) {
     private val workspaceDir: File get() = File(context.filesDir, "workspace")
 
     fun isInstalled(): Boolean {
-        return File(rootfsDir, "etc/alpine-release").exists() && prootBin.exists()
+        // 最小布局校验（对齐 ReTerminal init-host.sh rootfs_has_minimum_layout）：
+        // bin/sh + /etc/os-release 存在且非空目录；bin/sh 可能是指向 busybox
+        // 的符号链接，宿主侧用 exists()/isFile 均可（proot 内才展开）。
+        if (!prootBin.exists()) return false
+        val sh = File(rootfsDir, "bin/sh")
+        if (!sh.exists() && !sh.isDirectory) return false
+        return File(rootfsDir, "etc/os-release").exists()
     }
 
     /**
@@ -102,39 +108,127 @@ class AlpineEnvironment(private val context: Context) {
         }
         onProgress(0.75f)
 
-        // 4) 解压（系统 tar，不依赖 rootfs 内 tar）
-        if (File(rootfsDir, "etc/alpine-release").exists().not() || rootfsDir.listFiles()?.isEmpty() == true) {
+        // 4) 解压（系统 tar，不依赖 rootfs 内 tar；最小布局校验不过即重建）
+        if (!hasMinimumRootfsLayout()) {
             rootfsDir.deleteRecursively()
             rootfsDir.mkdirs()
             extractTarball(tarball, rootfsDir)
+            if (!hasMinimumRootfsLayout()) {
+                throw IllegalStateException("rootfs 解压后缺少 bin/sh 或 etc/os-release")
+            }
         }
         onProgress(0.9f)
 
         // 5) 工作区挂载点
         File(rootfsDir, "workspace").mkdirs()
         File(rootfsDir, "sdcard").mkdirs()
+        File(rootfsDir, "tmp").mkdirs()
         onProgress(1f)
     }
 
-    /** 执行命令：PRoot 用户态 chroot -> rootfs 内 /bin/sh。免 root。 */
+    /** 最小布局检查：bin/sh 与 etc/os-release（对齐 ReTerminal rootfs_has_minimum_layout） */
+    private fun hasMinimumRootfsLayout(): Boolean {
+        val sh = File(rootfsDir, "bin/sh")
+        if (!sh.exists() && !sh.isDirectory) return false
+        return File(rootfsDir, "etc/os-release").exists()
+    }
+
+    /**
+     * 组装 proot 参数（对齐 OmniBot ReTerminal init-host.sh 的已验证组合）：
+     *  - --kill-on-exit：shell 退出时回收全部子进程
+     *  - -0 / --link2symlink / --sysvipc：root 伪装 + hardlink 转 symlink + SysV IPC
+     *  - 系统分区按存在性绑定（动态链接器需要 linkerconfig/property_contexts）
+     *  - /proc/self/fd → /dev/fd|stdin|stdout|stderr（管道服务依赖）
+     *  - PREFIX 自绑定让 rootfs 内可见宿主侧脚本/二进制
+     */
+    fun buildProotArgs(extraBinds: List<String> = emptyList()): List<String> {
+        val args = mutableListOf("--kill-on-exit", "-0", "--link2symlink", "--sysvipc", "-w", "/")
+
+        // 系统分区（init-host.sh 同款清单）
+        for (mnt in listOf(
+            "/apex", "/odm", "/product", "/system", "/system_ext", "/vendor",
+            "/linkerconfig/ld.config.txt",
+            "/linkerconfig/com.android.art/ld.config.txt",
+            "/plat_property_contexts", "/property_contexts"
+        )) {
+            val f = File(mnt)
+            if (f.exists()) args.addAll(listOf("-b", f.absolutePath))
+        }
+
+        args.addAll(listOf("-b", "/sdcard", "-b", "/storage"))
+        args.addAll(listOf("-b", "/dev", "-b", "/dev/urandom:/dev/random"))
+        args.addAll(listOf("-b", "/proc", "-b", "/sys"))
+
+        // 应用数据自绑定（/data/data 与 /data/user/0 双路径互通）
+        val dataDir = context.applicationInfo.dataDir
+        if (dataDir.startsWith("/data/data/")) {
+            val realUser0 = "/data/user/0/${dataDir.removePrefix("/data/data/")}"
+            if (File(realUser0).exists()) {
+                args.addAll(listOf("-b", "$realUser0:$realUser0"))
+            }
+        }
+        args.addAll(listOf("-b", alpineDir.absolutePath))
+
+        // 工作区挂载点
+        workspaceDir.mkdirs()
+        File(rootfsDir, "workspace").mkdirs()
+        File(rootfsDir, "sdcard").mkdirs()
+        File(rootfsDir, "tmp").mkdirs()
+        args.addAll(listOf("-b", "${workspaceDir.absolutePath}:/workspace"))
+        args.addAll(listOf("-b", "${File(alpineDir, "tmp").absolutePath}:/dev/shm"))
+
+        for (bind in extraBinds) args.addAll(listOf("-b", bind))
+
+        args.addAll(listOf("-r", rootfsDir.absolutePath))
+        return args
+    }
+
+    /** 宿主侧环境变量（对齐 shiyi termux_runtime environment() 的注入清单） */
+    fun buildHostEnvironment(): Map<String, String> {
+        val nativeLib = context.applicationInfo.nativeLibraryDir
+        val linker =
+            if (File("/system/bin/linker64").exists()) "/system/bin/linker64" else "/system/bin/linker"
+        return mapOf(
+            "HOME" to rootfsDir.absolutePath,
+            "PATH" to "${prootBin.parent}:${System.getenv("PATH")}",
+            "TMPDIR" to File(alpineDir, "tmp").apply { mkdirs() }.absolutePath,
+            "PROOT_TMP_DIR" to File(alpineDir, "tmp").absolutePath,
+            "LD_LIBRARY_PATH" to libsDir.absolutePath,
+            "LINKER" to linker,
+            "PROOT_LOADER" to File(nativeLib, "libproot-loader.so").takeIf { it.exists() }?.absolutePath.orEmpty(),
+            "TERM" to "xterm-256color",
+            "LANG" to "C.UTF-8"
+        ).filterValues { it.isNotEmpty() }
+    }
+
+    /** proot 启动 argv 前缀：[linker, proot, <args...>]，后半段由调用方拼接 */
+    fun prootArgvPrefix(): Array<String> {
+        if (!isInstalled()) throw IllegalStateException("Linux 环境未安装")
+        val env = buildHostEnvironment()
+        require(env.containsKey("LD_LIBRARY_PATH")) { "LD_LIBRARY_PATH 未配置" }
+        return arrayOf(
+            env["LINKER"] ?: "/system/bin/linker64",
+            prootBin.absolutePath,
+            *buildProotArgs().toTypedArray()
+        )
+    }
+
+    /**
+     * 执行一次性命令（每次独立 proot 进程）。Agent 高频执行走 HiddenShellManager
+     * （常驻 shell 复用），本方法仅用于安装期/低频管理命令。
+     */
     fun execCommand(command: String): LinuxCommandResult {
         if (!isInstalled()) throw IllegalStateException("Linux 环境未安装")
-        val cmd = arrayOf(
-            prootBin.absolutePath,
-            "-0", // 伪装 root
-            "-r", rootfsDir.absolutePath,
-            "-b", "/proc:/proc",
-            "-b", "/dev:/dev",
-            "-b", "/sys:/sys",
-            "-b", "/sdcard:/sdcard",
-            "-b", "${workspaceDir.absolutePath}:/workspace",
-            "-w", "/workspace",
-            "/bin/sh", "-c", command
-        )
-        // proot 动态链接 libtalloc/libandroid-shmem，需设置加载路径
-        val env = arrayOf("LD_LIBRARY_PATH=${libsDir.absolutePath}")
-        return runProcess(cmd, env)
+        val cmd = prootArgvPrefix() + arrayOf("/bin/sh", "-c", command)
+        return runProcess(cmd, buildHostEnvironment())
     }
+
+    /**
+     * 创建常驻隐藏 shell 的 argv 与环境：
+     * [proot … bind mounts] /bin/bash --noprofile --norc（OperitTerminalCore 隐藏 shell 形态）
+     */
+    fun hiddenShellArgv(): Array<String> =
+        prootArgvPrefix() + arrayOf("/bin/bash", "--noprofile", "--norc")
 
     /** 预装默认工具（可选，安装完成后调用）。 */
     fun installToolProfile(onProgress: (Float) -> Unit): LinuxCommandResult {
@@ -147,9 +241,12 @@ class AlpineEnvironment(private val context: Context) {
 
     // ── 内部工具 ─────────────────────────────────────────────
 
-    private fun runProcess(cmd: Array<String>, env: Array<String> = emptyArray()): LinuxCommandResult {
+    private fun runProcess(cmd: Array<String>, env: Map<String, String> = emptyMap()): LinuxCommandResult {
         val process = try {
-            Runtime.getRuntime().exec(cmd, env)
+            val pb = ProcessBuilder(*cmd)
+            pb.environment().clear()
+            pb.environment().putAll(env)
+            pb.start()
         } catch (e: IOException) {
             return LinuxCommandResult("", "启动进程失败: ${e.message}", -1)
         }

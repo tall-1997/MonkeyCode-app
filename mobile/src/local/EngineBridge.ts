@@ -98,6 +98,14 @@ class EngineBridge {
     throw new Error('特权模块不可用');
   }
 
+  /** 答复引擎提问卡（question 工具阻塞等待中）。 */
+  async answerQuestion(answersJson: string): Promise<boolean> {
+    if (PrivilegedExecution) {
+      return (await PrivilegedExecution.resolveLocalQuestion(answersJson)) as boolean;
+    }
+    return false;
+  }
+
   async stopEngine(): Promise<void> {
     if (this.status === 'stopped') return;
     try {

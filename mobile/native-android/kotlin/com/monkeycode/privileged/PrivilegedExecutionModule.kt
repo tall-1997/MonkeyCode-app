@@ -527,6 +527,21 @@ class PrivilegedExecutionModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    /** 提问卡答复：唤醒 AgentRuntime 内等待中的 question 工具调用。 */
+    @ReactMethod
+    fun resolveLocalQuestion(answersJson: String, promise: Promise) {
+        try {
+            val sid = agentSessionId
+            if (sid == null) {
+                promise.resolve(false)
+                return
+            }
+            promise.resolve(agentRuntime.answerQuestion(sid, answersJson))
+        } catch (e: Exception) {
+            promise.reject("AGENT_QUESTION_ERROR", e.message)
+        }
+    }
+
     @ReactMethod
     fun cancelAgent(promise: Promise) {
         try {
