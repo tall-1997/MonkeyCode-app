@@ -193,6 +193,10 @@ function tuneGradleProperties(androidDir) {
     content += '\norg.gradle.workers.max=2\n';
   }
 
+  if (!content.includes('android.suppressUnsupportedCompileSdk=37')) {
+    content += '\nandroid.suppressUnsupportedCompileSdk=37\n';
+  }
+
   fs.writeFileSync(propsFile, content);
 }
 

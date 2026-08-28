@@ -108,3 +108,4 @@ jobs:
           unzip -l android/app/build/outputs/apk/release/app-release.apk | grep 'META-INF/xposed/java_init.list'
           unzip -l android/app/build/outputs/apk/release/app-release.apk | grep 'META-INF/xposed/module.prop'
           unzip -l android/app/build/outputs/apk/release/app-release.apk | grep 'META-INF/xposed/scope.list'
+          grep -F 'android.compileSdkVersion=37' android/gradle.properties

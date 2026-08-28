@@ -80,6 +80,7 @@ jobs:
           grep -F 'io.github.libxposed:service:102.0.0' android/app/build.gradle
           grep -F 'XposedServiceBridge.initialize(this)' android/app/src/main/java/com/chaitin/baizhi/monkeycode/MainApplication.kt
           grep -F 'android.minSdkVersion=26' android/gradle.properties
+          grep -F 'android.compileSdkVersion=37' android/gradle.properties
 
       - name: Compile merged application Kotlin
         working-directory: mobile/android

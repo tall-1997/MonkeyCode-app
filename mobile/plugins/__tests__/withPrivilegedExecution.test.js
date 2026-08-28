@@ -22,5 +22,7 @@ describe('withPrivilegedExecution Xposed integration', () => {
     const appConfig = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'app.json'), 'utf8'));
     const buildProperties = appConfig.expo.plugins.find((plugin) => Array.isArray(plugin) && plugin[0] === 'expo-build-properties');
     expect(buildProperties[1].android.minSdkVersion).toBe(26);
+    expect(buildProperties[1].android.compileSdkVersion).toBe(37);
+    expect(pluginSource).toContain('android.suppressUnsupportedCompileSdk=37');
   });
 });
