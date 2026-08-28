@@ -23,7 +23,9 @@ function withPrivilegedExecution(config) {
 
     for (const perm of permissions) {
       manifest['uses-permission'] = manifest['uses-permission'] || [];
-      manifest['uses-permission'].push({ $: { 'android:name': perm } });
+      if (!manifest['uses-permission'].some((item) => item.$?.['android:name'] === perm)) {
+        manifest['uses-permission'].push({ $: { 'android:name': perm } });
+      }
     }
 
     // application 在 Expo manifest 结构中是数组，取第一个元素
@@ -68,6 +70,12 @@ function withPrivilegedExecution(config) {
       'meta-data': addMetaData('android.speech.recognition', '@xml/recognition_service_config'),
     });
 
+    addProvider(mainApplication, {
+      'android:name': 'io.github.libxposed.service.XposedProvider',
+      'android:authorities': '${applicationId}.XposedService',
+      'android:exported': 'true',
+    });
+
     return config;
   });
 
@@ -94,6 +102,8 @@ function withPrivilegedExecution(config) {
       }
     }
 
+    copyXposedModule(projectRoot, androidDir);
+
     // 拷贝 XML 资源
     const xmlSrcDir = path.join(projectRoot, 'native-android', 'res', 'xml');
     if (fs.existsSync(xmlSrcDir)) {
@@ -119,6 +129,9 @@ function withPrivilegedExecution(config) {
 
     // 注册 MonkeyCodePackage 到 MainApplication
     registerPackage(projectRoot);
+    registerXposedService(projectRoot);
+
+    configureXposedGradle(androidDir);
 
     return config;
   }]);
@@ -126,9 +139,17 @@ function withPrivilegedExecution(config) {
   return config;
 }
 
+function addProvider(application, attributes) {
+  const providers = application['provider'] || (application['provider'] = []);
+  const name = attributes['android:name'];
+  if (providers.some((provider) => provider.$?.['android:name'] === name)) return;
+  providers.push({ $: attributes });
+}
+
 function addService(application, service) {
   const services = application['service'] || (application['service'] = []);
-  const svc = { $: {} };
+  const name = service['android:name'];
+  const svc = services.find((item) => item.$?.['android:name'] === name) || { $: {} };
   for (const [k, v] of Object.entries(service)) {
     if (k === 'intent-filter' || k === 'meta-data') {
       const arr = Array.isArray(v) ? v : [v];
@@ -137,7 +158,7 @@ function addService(application, service) {
       svc.$[k] = v;
     }
   }
-  services.push(svc);
+  if (!services.includes(svc)) services.push(svc);
 }
 
 function addIntentFilter(actionName) {
@@ -196,6 +217,27 @@ function copySandboxAssets(projectRoot, androidDir) {
   })(srcDir, assetsMain);
 }
 
+function copyXposedModule(projectRoot, androidDir) {
+  const hookSource = path.join(projectRoot, 'lsposed', 'src', 'main', 'java', 'com', 'monkeycode', 'hook');
+  const bridgeSource = path.join(projectRoot, 'native-android', 'kotlin', 'com', 'monkeycode', 'hook');
+  const hookDestination = path.join(androidDir, 'app', 'src', 'main', 'java', 'com', 'monkeycode', 'hook');
+  const metadataSource = path.join(projectRoot, 'lsposed', 'src', 'main', 'resources', 'META-INF', 'xposed');
+  const metadataDestination = path.join(androidDir, 'app', 'src', 'main', 'resources', 'META-INF', 'xposed');
+
+  fs.mkdirSync(hookDestination, { recursive: true });
+  for (const file of ['HookRegistrar.kt', 'ModuleMain.kt']) {
+    fs.copyFileSync(path.join(hookSource, file), path.join(hookDestination, file));
+  }
+  for (const file of ['XposedServiceBridge.kt']) {
+    fs.copyFileSync(path.join(bridgeSource, file), path.join(hookDestination, file));
+  }
+
+  fs.mkdirSync(metadataDestination, { recursive: true });
+  for (const file of ['java_init.list', 'module.prop', 'scope.list']) {
+    fs.copyFileSync(path.join(metadataSource, file), path.join(metadataDestination, file));
+  }
+}
+
 function ensureStringResource(androidDir) {
   const valuesDir = path.join(androidDir, 'app', 'src', 'main', 'res', 'values');
   const stringsFile = path.join(valuesDir, 'strings.xml');
@@ -209,6 +251,13 @@ function ensureStringResource(androidDir) {
     );
     fs.writeFileSync(stringsFile, content);
   }
+  if (!content.includes('xposed_module_description')) {
+    content = content.replace(
+      '</resources>',
+      '    <string name="xposed_module_description">MonkeyCode 本地 Agent 的 LSPosed API 102 系统入口模块</string>\n</resources>'
+    );
+  }
+  fs.writeFileSync(stringsFile, content);
 }
 
 function registerPackage(projectRoot) {
@@ -230,6 +279,44 @@ function registerPackage(projectRoot) {
       content.slice(idx);
     fs.writeFileSync(mainAppPath, content);
   }
+}
+
+function registerXposedService(projectRoot) {
+  const mainAppPath = findMainApplication(path.join(projectRoot, 'android'));
+  if (!mainAppPath) return;
+
+  let content = fs.readFileSync(mainAppPath, 'utf8');
+  const statement = 'com.monkeycode.hook.XposedServiceBridge.initialize(this)';
+  if (content.includes(statement)) return;
+
+  const anchor = 'super.onCreate()';
+  if (content.includes(anchor)) {
+    content = content.replace(anchor, `${anchor}\n    ${statement}`);
+    fs.writeFileSync(mainAppPath, content);
+  }
+}
+
+function configureXposedGradle(androidDir) {
+  const buildFile = path.join(androidDir, 'app', 'build.gradle');
+  if (!fs.existsSync(buildFile)) return;
+
+  let content = fs.readFileSync(buildFile, 'utf8');
+  const dependencyMarker = 'compileOnly("io.github.libxposed:api:102.0.0")';
+  if (!content.includes(dependencyMarker)) {
+    content = content.replace(
+      'dependencies {',
+      `dependencies {\n    ${dependencyMarker}\n    implementation("io.github.libxposed:service:102.0.0")`
+    );
+  }
+
+  const packagingMarker = "merges += ['META-INF/xposed/java_init.list', 'META-INF/xposed/module.prop', 'META-INF/xposed/scope.list']";
+  if (!content.includes(packagingMarker)) {
+    content = content.replace(
+      'packagingOptions {',
+      `packagingOptions {\n        resources {\n            ${packagingMarker}\n        }`
+    );
+  }
+  fs.writeFileSync(buildFile, content);
 }
 
 function findMainApplication(androidDir) {

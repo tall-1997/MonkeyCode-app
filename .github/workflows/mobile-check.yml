@@ -5,12 +5,10 @@ on:
     branches: [main]
     paths:
       - 'mobile/**'
-      - '!mobile/lsposed/**'
       - '.github/workflows/mobile-check.yml'
   pull_request:
     paths:
       - 'mobile/**'
-      - '!mobile/lsposed/**'
       - '.github/workflows/mobile-check.yml'
   workflow_dispatch:
 
@@ -92,12 +90,21 @@ jobs:
         uses: actions/cache@v4
         with:
           path: mobile/android
-          key: expo-android-${{ runner.os }}-${{ hashFiles('mobile/package-lock.json', 'mobile/app.json', 'mobile/plugins/**', 'mobile/native-android/**') }}
+          key: expo-android-${{ runner.os }}-${{ hashFiles('mobile/package-lock.json', 'mobile/app.json', 'mobile/plugins/**', 'mobile/native-android/**', 'mobile/lsposed/src/main/**') }}
 
       - name: Prebuild Android
         if: steps.expo-prebuild-cache.outputs.cache-hit != 'true'
         run: npx expo prebuild --platform android --clean --no-install
 
-      - name: Kotlin compile gate
+      - name: Assemble merged release APK
         working-directory: mobile/android
-        run: ./gradlew :app:compileReleaseKotlin --build-cache --no-daemon
+        run: ./gradlew :app:assembleRelease --build-cache --no-daemon
+
+      - name: Verify embedded Xposed sources and metadata
+        run: |
+          test -f android/app/src/main/java/com/monkeycode/hook/ModuleMain.kt
+          test -f android/app/src/main/java/com/monkeycode/hook/XposedServiceBridge.kt
+          test -f android/app/src/main/resources/META-INF/xposed/java_init.list
+          unzip -l android/app/build/outputs/apk/release/app-release.apk | grep 'META-INF/xposed/java_init.list'
+          unzip -l android/app/build/outputs/apk/release/app-release.apk | grep 'META-INF/xposed/module.prop'
+          unzip -l android/app/build/outputs/apk/release/app-release.apk | grep 'META-INF/xposed/scope.list'

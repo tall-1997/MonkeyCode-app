@@ -5,7 +5,6 @@ on:
     branches: [main]
     paths:
       - 'mobile/**'
-      - '!mobile/lsposed/**'
       - 'scripts/prepare_android_sandbox.sh'
       - '.github/workflows/mobile-build.yml'
   workflow_dispatch:
@@ -88,14 +87,20 @@ jobs:
         working-directory: mobile/android
         run: ./gradlew :app:assembleRelease --build-cache --no-daemon
 
+      - name: Verify embedded Xposed metadata
+        run: |
+          unzip -l android/app/build/outputs/apk/release/app-release.apk | grep 'META-INF/xposed/java_init.list'
+          unzip -l android/app/build/outputs/apk/release/app-release.apk | grep 'META-INF/xposed/module.prop'
+          unzip -l android/app/build/outputs/apk/release/app-release.apk | grep 'META-INF/xposed/scope.list'
+
       - name: Assign unique APK name
-        run: cp android/app/build/outputs/apk/release/app-release.apk "MonkeyCode-mobile-${GITHUB_SHA}.apk"
+        run: cp android/app/build/outputs/apk/release/app-release.apk "MonkeyCode-mobile-agent-lsposed-${GITHUB_SHA}.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: monkeycode-mobile-${{ github.sha }}
-          path: mobile/MonkeyCode-mobile-${{ github.sha }}.apk
+          path: mobile/MonkeyCode-mobile-agent-lsposed-${{ github.sha }}.apk
           if-no-files-found: error
 
   release:
@@ -114,7 +119,7 @@ jobs:
         with:
           name: Mobile Build ${{ github.run_number }}
           tag_name: mobile-build-${{ github.run_number }}
-          files: artifacts/MonkeyCode-mobile-${{ github.sha }}.apk
+          files: artifacts/MonkeyCode-mobile-agent-lsposed-${{ github.sha }}.apk
           fail_on_unmatched_files: true
           draft: false
           prerelease: true

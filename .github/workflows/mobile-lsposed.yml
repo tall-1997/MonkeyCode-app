@@ -1,15 +1,6 @@
-name: Build Mobile LSPosed API 102
+name: Verify Embedded LSPosed API 102
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'mobile/lsposed/**'
-      - '.github/workflows/mobile-lsposed.yml'
-  pull_request:
-    paths:
-      - 'mobile/lsposed/**'
-      - '.github/workflows/mobile-lsposed.yml'
   workflow_dispatch:
 
 concurrency:
@@ -17,7 +8,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
   actions: read
 
 jobs:
@@ -43,18 +34,28 @@ jobs:
               run.id !== context.runId && run.conclusion === 'success'
             );
 
-  build:
+  verify:
     needs: deduplicate
     if: needs.deduplicate.outputs.should-run == 'true'
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
     steps:
       - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
 
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: '17'
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
@@ -62,48 +63,24 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Compile LSPosed API 102 module
-        working-directory: mobile/lsposed
-        run: ./gradlew compileReleaseKotlin --build-cache --no-daemon
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Assemble LSPosed API 102 module
-        working-directory: mobile/lsposed
-        run: ./gradlew assembleRelease --build-cache --no-daemon
+      - name: Prebuild merged Android application
+        run: npx expo prebuild --platform android --clean --no-install
 
-      - name: Assign unique APK name
-        shell: bash
+      - name: Verify generated Xposed integration
         run: |
-          shopt -s nullglob
-          apks=(mobile/lsposed/build/outputs/apk/release/*.apk)
-          test "${#apks[@]}" -eq 1
-          cp "${apks[0]}" "mobile/lsposed/MonkeyCode-lsposed-api102-${GITHUB_SHA}.apk"
+          test -f android/app/src/main/java/com/monkeycode/hook/ModuleMain.kt
+          test -f android/app/src/main/java/com/monkeycode/hook/XposedServiceBridge.kt
+          test -f android/app/src/main/resources/META-INF/xposed/java_init.list
+          test -f android/app/src/main/resources/META-INF/xposed/module.prop
+          test -f android/app/src/main/resources/META-INF/xposed/scope.list
+          grep -F 'io.github.libxposed:api:102.0.0' android/app/build.gradle
+          grep -F 'io.github.libxposed:service:102.0.0' android/app/build.gradle
+          grep -F 'XposedServiceBridge.initialize(this)' android/app/src/main/java/com/chaitin/baizhi/monkeycode/MainApplication.kt
+          grep -F 'android.minSdkVersion=26' android/gradle.properties
 
-      - name: Upload LSPosed APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: monkeycode-lsposed-api102-${{ github.sha }}
-          path: mobile/lsposed/MonkeyCode-lsposed-api102-${{ github.sha }}.apk
-          if-no-files-found: error
-
-  release:
-    needs: build
-    if: github.ref == 'refs/heads/main' && success()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download LSPosed APK
-        uses: actions/download-artifact@v4
-        with:
-          name: monkeycode-lsposed-api102-${{ github.sha }}
-          path: artifacts
-
-      - name: Create LSPosed release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: LSPosed API 102 Build ${{ github.run_number }}
-          tag_name: mobile-lsposed-${{ github.run_number }}
-          files: artifacts/MonkeyCode-lsposed-api102-${{ github.sha }}.apk
-          fail_on_unmatched_files: true
-          draft: false
-          prerelease: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Compile merged application Kotlin
+        working-directory: mobile/android
+        run: ./gradlew :app:compileReleaseKotlin --build-cache --no-daemon

@@ -30,6 +30,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    sourceSets {
+        getByName("main").java.srcDir("../native-android/kotlin/com/monkeycode/hook")
+    }
+
 }
 
 dependencies {
