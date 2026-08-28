@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode, useRef } from 'react';
 import { networkMonitor } from './NetworkMonitor';
 
 type SyncStatus = 'idle' | 'syncing' | 'error';
@@ -20,27 +20,35 @@ const OfflineContext = createContext<OfflineContextType>({
 export function OfflineProvider({ children }: { children: ReactNode }) {
   const [isOnline, setIsOnline] = useState(true);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('idle');
+  const syncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const scheduleIdle = useCallback(() => {
+    if (syncTimer.current) clearTimeout(syncTimer.current);
+    syncTimer.current = setTimeout(() => setSyncStatus('idle'), 3000);
+  }, []);
 
   useEffect(() => {
     networkMonitor.start();
-    networkMonitor.onStatusChange((status) => {
+    const unsubscribe = networkMonitor.onStatusChange((status) => {
       setIsOnline(status === 'online');
       if (status === 'online') {
         setSyncStatus('syncing');
         // 触发同步，延迟以等待网络稳定
-        setTimeout(() => setSyncStatus('idle'), 3000);
+        scheduleIdle();
       }
     });
 
     return () => {
       networkMonitor.stop();
+      unsubscribe?.();
+      if (syncTimer.current) clearTimeout(syncTimer.current);
     };
-  }, []);
+  }, [scheduleIdle]);
 
   const triggerSync = useCallback(() => {
     setSyncStatus('syncing');
-    setTimeout(() => setSyncStatus('idle'), 3000);
-  }, []);
+    scheduleIdle();
+  }, [scheduleIdle]);
 
   return (
     <OfflineContext.Provider

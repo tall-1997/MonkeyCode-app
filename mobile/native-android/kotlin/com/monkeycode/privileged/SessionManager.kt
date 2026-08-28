@@ -75,6 +75,13 @@ class SessionManager(private val context: Context) {
     private val sessions = ConcurrentHashMap<String, SessionMeta>()
     private val journalWriters = ConcurrentHashMap<String, Any>()
 
+    private fun sessionDir(id: String): File {
+        require(id.matches(Regex("[A-Za-z0-9_.-]+"))) { "无效会话 ID" }
+        val dir = File(sessionsDir, id).canonicalFile
+        require(dir.parentFile == sessionsDir.canonicalFile) { "会话路径超出边界" }
+        return dir
+    }
+
     init {
         sessionsDir.mkdirs()
         coldRepair()
@@ -94,7 +101,7 @@ class SessionManager(private val context: Context) {
         sessions[id] = meta
         journalWriters[id] = Any()
 
-        val sessionDir = File(sessionsDir, id)
+        val sessionDir = sessionDir(id)
         sessionDir.mkdirs()
 
         // 写入 meta.json
@@ -150,14 +157,14 @@ class SessionManager(private val context: Context) {
     fun sessionDestroy(id: String) {
         sessions.remove(id)
         journalWriters.remove(id)
-        val sessionDir = File(sessionsDir, id)
+        val sessionDir = sessionDir(id)
         if (sessionDir.exists()) {
             sessionDir.deleteRecursively()
         }
     }
 
     fun sessionHistory(id: String, cursor: Long, limit: Int = 50): List<JSONObject> {
-        val eventsFile = File(File(sessionsDir, id), "events.jsonl")
+        val eventsFile = File(sessionDir(id), "events.jsonl")
         if (!eventsFile.exists()) return emptyList()
 
         val frames = mutableListOf<JSONObject>()
@@ -182,7 +189,7 @@ class SessionManager(private val context: Context) {
     }
 
     fun sessionOutline(id: String): List<JSONObject> {
-        val eventsFile = File(File(sessionsDir, id), "events.jsonl")
+        val eventsFile = File(sessionDir(id), "events.jsonl")
         if (!eventsFile.exists()) return emptyList()
 
         val outline = mutableListOf<JSONObject>()
@@ -205,7 +212,7 @@ class SessionManager(private val context: Context) {
     }
 
     fun sessionFrame(id: String, seq: Long): JSONObject? {
-        val eventsFile = File(File(sessionsDir, id), "events.jsonl")
+        val eventsFile = File(sessionDir(id), "events.jsonl")
         if (!eventsFile.exists()) return null
 
         try {
@@ -253,7 +260,7 @@ class SessionManager(private val context: Context) {
     fun appendFrame(id: String, frame: JSONObject) {
         val lock = journalWriters[id] ?: return
         synchronized(lock) {
-val eventsFile = File(File(sessionsDir, id), "events.jsonl")
+            val eventsFile = File(sessionDir(id), "events.jsonl")
             try {
                 FileWriter(eventsFile, true).use { writer ->
                     writer.write(frame.toString())
@@ -267,7 +274,7 @@ val eventsFile = File(File(sessionsDir, id), "events.jsonl")
     fun appendReplayFrame(id: String, frame: JSONObject) {
         val lock = journalWriters[id] ?: return
         synchronized(lock) {
-            val replayFile = File(File(sessionsDir, id), "replay.jsonl")
+            val replayFile = File(sessionDir(id), "replay.jsonl")
             try {
                 FileWriter(replayFile, true).use { writer ->
                     writer.write(frame.toString())
@@ -350,7 +357,7 @@ val eventsFile = File(File(sessionsDir, id), "events.jsonl")
     }
 
     fun getEventCount(id: String): Long {
-        val eventsFile = File(File(sessionsDir, id), "events.jsonl")
+        val eventsFile = File(sessionDir(id), "events.jsonl")
         if (!eventsFile.exists()) return 0
         return try {
             eventsFile.readLines().size.toLong()
@@ -385,7 +392,7 @@ val eventsFile = File(File(sessionsDir, id), "events.jsonl")
     }
 
     private fun writeMeta(meta: SessionMeta) {
-        val metaFile = File(File(sessionsDir, meta.id), "meta.json")
+        val metaFile = File(sessionDir(meta.id), "meta.json")
         metaFile.parentFile?.mkdirs()
         try {
             metaFile.writeText(JSONObject().apply {

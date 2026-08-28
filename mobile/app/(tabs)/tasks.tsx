@@ -1,163 +1,75 @@
 import { useFocusEffect, useRouter } from 'expo-router';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, FlatList, Pressable, RefreshControl, Text, View } from 'react-native';
+import React, { useCallback, useState } from 'react';
+import { Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { ApiError, deleteTask, listTasks, stopTask } from '@/api/client';
-import type { ProjectTask } from '@/api/types';
-import { SwipeableRow } from '@/components/SwipeableRow';
-import { TaskCard } from '@/components/TaskCard';
-import { BigTitle, EmptyView, GlassTop, LoadingView } from '@/components/ui';
-import { taskDisplayName } from '@/utils/format';
+import { Icons } from '@/components/Icons';
+import { useAuth } from '@/auth/AuthContext';
+import { BigTitle, Card, GlassTop, Pill } from '@/components/ui';
+import { listRecentLocalSessions, type LocalSessionSummary } from '@/local/localProjects';
+import { permissionDetector, type PermissionState } from '@/local/PermissionDetector';
 import { spacing, useTheme } from '@/theme';
-
-const PAGE_SIZE = 20;
-
-const FILTERS = [
-  { k: 'running', label: '进行中', status: 'pending,processing' },
-  { k: 'done', label: '已结束', status: 'finished,error' },
-];
-const statusFor = (k: string) => FILTERS.find((f) => f.k === k)?.status ?? '';
 
 export default function TasksScreen() {
   const t = useTheme();
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const [tasks, setTasks] = useState<ProjectTask[]>([]);
-  const [page, setPage] = useState(1);
-  const [hasMore, setHasMore] = useState(true);
-  const [fetching, setFetching] = useState(true); // 首屏/切换筛选时的拉取中
-  const [refreshing, setRefreshing] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [error, setError] = useState('');
-  const [filter, setFilter] = useState('running');
+  const { authenticated } = useAuth();
+  const [prompt, setPrompt] = useState('');
+  const [sessions, setSessions] = useState<LocalSessionSummary[]>([]);
+  const [permission, setPermission] = useState<PermissionState | null>(() => permissionDetector.getState());
   const [collapsed, setCollapsed] = useState(false);
-  const loadingRef = useRef(false);
-
-  const fetchPage = useCallback(async (pageNum: number, mode: 'first' | 'more' | 'refresh', status: string) => {
-    if (loadingRef.current) return;
-    loadingRef.current = true;
-    if (mode === 'more') setLoadingMore(true);
-    else if (mode === 'first') setFetching(true);
-    setError('');
-    try {
-      const list = await listTasks({ page: pageNum, size: PAGE_SIZE, status });
-      setTasks((prev) => (mode === 'more' ? [...prev, ...list] : list));
-      setHasMore(list.length >= PAGE_SIZE);
-      setPage(pageNum);
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : '加载失败');
-      if (mode !== 'more') setTasks([]);
-    } finally {
-      loadingRef.current = false;
-      setFetching(false);
-      setRefreshing(false);
-      setLoadingMore(false);
-    }
-  }, []);
-
-  // 首屏 + 切换筛选：清空并按该状态重新拉取（status 交给后端筛选，分页才正确）
-  useEffect(() => {
-    setTasks([]);
-    setHasMore(true);
-    fetchPage(1, 'first', statusFor(filter));
-  }, [filter, fetchPage]);
-
-  // 从新建任务等页面返回时静默刷新当前筛选
-  const didMountRef = useRef(false);
   useFocusEffect(
     useCallback(() => {
-      if (!didMountRef.current) { didMountRef.current = true; return; }
-      fetchPage(1, 'refresh', statusFor(filter));
-    }, [fetchPage, filter]),
+      let active = true;
+      void Promise.all([listRecentLocalSessions(4), permissionDetector.detect()]).then(([recent, state]) => {
+        if (active) { setSessions(recent); setPermission(state); }
+      });
+      return () => { active = false; };
+    }, []),
   );
 
-  const onRefresh = useCallback(() => { setRefreshing(true); setHasMore(true); fetchPage(1, 'refresh', statusFor(filter)); }, [fetchPage, filter]);
-  const onEndReached = useCallback(() => {
-    if (!loadingRef.current && hasMore) fetchPage(page + 1, 'more', statusFor(filter));
-  }, [fetchPage, hasMore, page, filter]);
-
-  const removeTask = useCallback((id: string) => setTasks((prev) => prev.filter((x) => x.id !== id)), []);
-
-  const confirmStop = useCallback((task: ProjectTask) => {
-    Alert.alert('终止任务', `确定终止「${taskDisplayName(task)}」？`, [
-      { text: '取消', style: 'cancel' },
-      { text: '终止', style: 'destructive', onPress: async () => {
-        try { await stopTask(task.id); removeTask(task.id); }
-        catch (e) { Alert.alert('终止失败', e instanceof ApiError ? e.message : '请稍后重试'); }
-      } },
-    ]);
-  }, [removeTask]);
-
-  const confirmDelete = useCallback((task: ProjectTask) => {
-    Alert.alert('删除任务', `删除「${taskDisplayName(task)}」？此操作不可恢复。`, [
-      { text: '取消', style: 'cancel' },
-      { text: '删除', style: 'destructive', onPress: async () => {
-        try { await deleteTask(task.id); removeTask(task.id); }
-        catch (e) { Alert.alert('删除失败', e instanceof ApiError ? e.message : '请稍后重试'); }
-      } },
-    ]);
-  }, [removeTask]);
-
-  const Header = (
-    <View>
-      <BigTitle title="智能任务" />
-      <View style={{ flexDirection: 'row', gap: 8, paddingHorizontal: spacing.pad, paddingTop: 12, paddingBottom: 8 }}>
-        {FILTERS.map((f) => {
-          const on = filter === f.k;
-          return (
-            <Pressable key={f.k} onPress={() => filter !== f.k && setFilter(f.k)} style={[{ height: 34, paddingHorizontal: 16, borderRadius: 99, alignItems: 'center', justifyContent: 'center', backgroundColor: on ? t.acGhost : t.bg2 }, !on && t.shCard]}>
-              <Text style={{ fontSize: 13.5, fontWeight: '600', color: on ? t.ac : t.tx2 }}>{f.label}</Text>
-            </Pressable>
-          );
-        })}
-      </View>
-    </View>
-  );
+  const start = () => router.push({ pathname: '/local-agent', params: prompt.trim() ? { prompt: prompt.trim() } : undefined });
+  const mode = permission?.mode === 'privileged' ? '特权模式' : '安全沙箱';
 
   return (
     <View style={{ flex: 1, backgroundColor: t.bg }}>
-      <FlatList
-        data={tasks}
-        keyExtractor={(item) => item.id}
-        renderItem={({ item }) => {
-          const running = item.status === 'pending' || item.status === 'processing';
-          const del = { key: 'delete', label: '删除', icon: 'trash', color: '#fff', bg: t.red, onPress: () => confirmDelete(item) };
-          const actions = running
-            ? [{ key: 'stop', label: '终止', icon: 'stop', color: '#fff', bg: t.amber, onPress: () => confirmStop(item) }, del]
-            : [del];
-          return (
-            <View style={{ paddingHorizontal: spacing.pad }}>
-              <SwipeableRow actions={actions}>
-                <TaskCard task={item} onPress={() => router.push(`/task/${item.id}`)} />
-              </SwipeableRow>
-            </View>
-          );
-        }}
-        ItemSeparatorComponent={() => <View style={{ height: spacing.gap }} />}
-        ListHeaderComponent={Header}
-        contentContainerStyle={{ paddingTop: insets.top + 8, paddingBottom: insets.bottom + 116, flexGrow: 1 }}
-        scrollIndicatorInsets={{ top: insets.top + 46 }}
+      <ScrollView contentContainerStyle={{ paddingTop: insets.top + 8, paddingBottom: insets.bottom + 116 }}
         onScroll={(e) => { const y = e.nativeEvent.contentOffset.y; setCollapsed((c) => (c !== y > 26 ? y > 26 : c)); }}
         scrollEventThrottle={16}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={t.ac} progressViewOffset={insets.top + 46} />}
-        onEndReached={onEndReached}
-        onEndReachedThreshold={0.4}
-        ListEmptyComponent={
-          fetching ? (
-            <View style={{ paddingTop: 60 }}><LoadingView label="加载任务…" /></View>
-          ) : error ? (
-            <View style={{ paddingTop: 40 }}><EmptyView title="加载失败" subtitle={error} icon="alert" /></View>
-          ) : (
-            <View style={{ paddingTop: 40 }}><EmptyView title={filter === 'running' ? '没有进行中的任务' : '还没有已结束的任务'} subtitle={filter === 'running' ? '点右下角 + 发起一个 AI 任务' : undefined} /></View>
-          )
-        }
-        ListFooterComponent={
-          loadingMore ? <View style={{ paddingVertical: 20, alignItems: 'center' }}><ActivityIndicator color={t.ac} /></View>
-            : !hasMore && tasks.length > 0 ? <Text style={{ textAlign: 'center', color: t.tx3, fontSize: 11, paddingVertical: 18 }}>没有更多了</Text>
-            : null
-        }
-      />
-      <GlassTop title="任务" collapsed={collapsed} />
+      >
+        <BigTitle title="Agent" sub="任务在本机运行，云端连接按需启用" />
+        <View style={{ paddingHorizontal: spacing.pad, paddingTop: 14, gap: 12 }}>
+          <Card style={{ padding: 16 }}>
+            <Text style={{ color: t.tx, fontSize: 19, fontWeight: '700', lineHeight: 26 }}>今天想让 Agent 做什么？</Text>
+            <TextInput value={prompt} onChangeText={setPrompt} multiline placeholder="描述任务、目标和约束…" placeholderTextColor={t.tx3}
+              style={{ minHeight: 112, marginTop: 14, padding: 14, borderRadius: 16, backgroundColor: t.bg3, color: t.tx, fontSize: 15, lineHeight: 22, textAlignVertical: 'top' }} />
+            <Pressable onPress={start} style={({ pressed }) => [{ height: 52, borderRadius: 16, marginTop: 12, backgroundColor: t.ac, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 }, pressed && { transform: [{ scale: 0.98 }] }]}>
+              <Icons.send size={18} color={t.acInk} sw={2.2} /><Text style={{ color: t.acInk, fontSize: 15, fontWeight: '800' }}>在本机运行</Text>
+            </Pressable>
+          </Card>
+
+          <View style={{ flexDirection: 'row', gap: 10 }}>
+            <Card style={{ flex: 1, padding: 14 }}><Icons.cube size={20} color={t.acTx} /><Text style={{ color: t.tx3, fontSize: 11.5, marginTop: 12 }}>运行环境</Text><Text style={{ color: t.tx, fontSize: 14, fontWeight: '700', marginTop: 3 }}>{mode}</Text></Card>
+            <Card style={{ flex: 1, padding: 14 }}><Icons.shield size={20} color={t.acTx} /><Text style={{ color: t.tx3, fontSize: 11.5, marginTop: 12 }}>权限范围</Text><Text style={{ color: t.tx, fontSize: 14, fontWeight: '700', marginTop: 3 }}>{permission?.capabilities.rootShell ? 'Root 已连接' : '按需审批'}</Text></Card>
+          </View>
+
+          <Pressable onPress={() => router.push(authenticated ? '/cloud-tasks' : '/login')} style={{ minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 4 }}>
+            <Icons.globe size={18} color={t.acTx} />
+            <Text style={{ flex: 1, color: t.tx, fontSize: 14, fontWeight: '700' }}>{authenticated ? '管理云端任务' : '登录后使用云端任务'}</Text>
+            <Icons.chevron size={17} color={t.tx3} />
+          </Pressable>
+
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}><Text style={{ flex: 1, color: t.tx, fontSize: 17, fontWeight: '700' }}>最近会话</Text><Pressable onPress={() => router.push('/(tabs)/activity')} style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 4 }}><Text style={{ color: t.acTx, fontWeight: '700' }}>查看全部</Text></Pressable></View>
+          {sessions.length ? sessions.map((session) => (
+            <Card key={session.id} style={{ minHeight: 68, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+              <View style={{ width: 38, height: 38, borderRadius: 12, backgroundColor: t.acGhost, alignItems: 'center', justifyContent: 'center' }}><Icons.robot size={19} color={t.acTx} /></View>
+              <View style={{ flex: 1 }}><Text numberOfLines={1} style={{ color: t.tx, fontSize: 14.5, fontWeight: '600' }}>{session.title}</Text><Text style={{ color: t.tx3, fontSize: 12, marginTop: 4 }}>{new Date(session.updatedAt).toLocaleString('zh-CN')}</Text></View>
+              <Pill color={t.acTx} bg={t.acGhost}>{session.status === 'running' ? '运行中' : '已结束'}</Pill>
+            </Card>
+          )) : <Card style={{ padding: 18 }}><Text style={{ color: t.tx2, fontSize: 13.5 }}>首个本地会话会显示在这里。</Text></Card>}
+        </View>
+      </ScrollView>
+      <GlassTop title="Agent" collapsed={collapsed} />
     </View>
   );
 }

@@ -2,8 +2,7 @@ package com.monkeycode.privileged
 
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.BufferedReader
-import java.io.InputStreamReader
+import java.io.BufferedInputStream
 import java.io.OutputStreamWriter
 import java.net.ServerSocket
 import java.net.Socket
@@ -27,13 +26,16 @@ class BrowserMcpServer(private val browserService: BrowserService) {
         private const val MAX_INFLIGHT = 32
         private const val MAX_HEADER_BYTES = 32 * 1024
         private const val MAX_BODY_BYTES = 4 * 1024 * 1024
+        private const val SERVER_STOP_TIMEOUT_MS = 2_000L
     }
 
     private class McpProtocolSession(
         val sessionId: String,
+        val protocolVersion: String,
         val contexts: ConcurrentHashMap<String, McpCallContext> = ConcurrentHashMap()
     ) {
         val closed = AtomicBoolean(false)
+        val initialized = AtomicBoolean(false)
     }
 
     private class McpCallContext(
@@ -42,6 +44,7 @@ class BrowserMcpServer(private val browserService: BrowserService) {
 
     fun getToken(): String = bearerToken
 
+    @Synchronized
     fun start(port: Int): Map<String, String> {
         this.port = port
         if (running.get()) stop()
@@ -73,16 +76,26 @@ class BrowserMcpServer(private val browserService: BrowserService) {
         }
         serverThread?.start()
         return mapOf(
-            "url" to "http://127.0.0.1:$port/mcp",
+            "url" to "http://127.0.0.1:$port/mcp/v${BrowserMcpContract.API_VERSION}",
             "token" to bearerToken
         )
     }
 
+    @Synchronized
     fun stop() {
         running.set(false)
-        try { serverSocket?.close() } catch (_: Exception) {}
+        val socket = serverSocket
+        val thread = serverThread
         serverSocket = null
         serverThread = null
+        try { socket?.close() } catch (_: Exception) {}
+        if (thread != null && thread !== Thread.currentThread()) {
+            try {
+                thread.join(SERVER_STOP_TIMEOUT_MS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        }
         sessions.clear()
     }
 
@@ -100,6 +113,23 @@ class BrowserMcpServer(private val browserService: BrowserService) {
                 return
             }
 
+            if (req.path != "/mcp" && req.path != "/mcp/v${BrowserMcpContract.API_VERSION}") {
+                sendHttp(socket, 404, "text/plain", "not found", null)
+                socket.close()
+                return
+            }
+
+            if (req.method == "DELETE") {
+                val sessionId = req.mcpSessionId
+                if (sessionId == null || sessions.remove(sessionId) == null) {
+                    sendHttp(socket, 404, "text/plain", "unknown MCP session", null)
+                } else {
+                    sendHttp(socket, 204, "application/json", "", null)
+                }
+                socket.close()
+                return
+            }
+
             if (req.method != "POST") {
                 sendHttp(socket, 405, "text/plain", "method not allowed", null)
                 socket.close()
@@ -112,10 +142,23 @@ class BrowserMcpServer(private val browserService: BrowserService) {
                 return
             }
 
+            if (rpc.optString("jsonrpc") != "2.0" || !rpc.has("method")) {
+                sendHttp(socket, 400, "application/json", rpcError(JSONObject.NULL, -32600, "invalid JSON-RPC request").toString(), null)
+                socket.close()
+                return
+            }
+
             val method = rpc.optString("method", "")
             val protocolId = if (method == "initialize") {
-                req.mcpSessionId?.takeIf { sessions.containsKey(it) }
-                    ?: createSession()
+                try {
+                    val requested = (rpc.optJSONObject("params") ?: JSONObject())
+                        .optString("protocolVersion", BrowserMcpContract.LATEST_PROTOCOL_VERSION)
+                    createSession(BrowserMcpContract.negotiateProtocol(requested))
+                } catch (error: IllegalArgumentException) {
+                    sendHttp(socket, 400, "application/json", rpcError(rpc.opt("id"), -32602, error.message ?: "invalid protocol version").toString(), null)
+                    socket.close()
+                    return
+                }
             } else {
                 req.mcpSessionId?.takeIf { sessions.containsKey(it) }
                     ?: run {
@@ -124,27 +167,29 @@ class BrowserMcpServer(private val browserService: BrowserService) {
                         return
                     }
             }
+            val session = sessions.getValue(protocolId)
+            if (method != "initialize" && req.mcpProtocolVersion != null &&
+                req.mcpProtocolVersion != session.protocolVersion
+            ) {
+                sendHttp(socket, 400, "application/json", rpcError(rpc.opt("id"), -32600, "MCP protocol version mismatch").toString(), protocolId)
+                socket.close()
+                return
+            }
 
             if (!rpc.has("id")) {
+                if (method == "notifications/initialized") sessions[protocolId]?.initialized?.set(true)
                 sendHttp(socket, 202, "application/json", "", protocolId)
                 socket.close()
                 return
             }
 
-            val id = rpc.opt("id")
+            val id = rpc.opt("id") ?: JSONObject.NULL
             val params = rpc.optJSONObject("params") ?: JSONObject()
 
             val result = try {
-                dispatch(method, params, protocolId)
+                dispatch(method, params, protocolId, id)
             } catch (e: Exception) {
-                JSONObject().apply {
-                    put("jsonrpc", "2.0")
-                    put("id", id)
-                    put("error", JSONObject().apply {
-                        put("code", -32000)
-                        put("message", e.message ?: "未知错误")
-                    })
-                }
+                rpcError(id, -32000, e.message ?: "未知错误")
             }
 
             sendHttp(socket, 200, "application/json", result.toString(), protocolId)
@@ -155,19 +200,19 @@ class BrowserMcpServer(private val browserService: BrowserService) {
         }
     }
 
-    private fun dispatch(method: String, params: JSONObject, protocolId: String): JSONObject {
+    private fun dispatch(method: String, params: JSONObject, protocolId: String, id: Any): JSONObject {
         return when (method) {
             "initialize" -> {
-                val ver = params.optString("protocolVersion", "2025-03-26")
+                val session = sessions.getValue(protocolId)
                 JSONObject().apply {
                     put("jsonrpc", "2.0")
-                    put("id", params.opt("id"))
+                    put("id", id)
                     put("result", JSONObject().apply {
-                        put("protocolVersion", ver)
+                        put("protocolVersion", session.protocolVersion)
                         put("capabilities", JSONObject().apply { put("tools", JSONObject()) })
                         put("serverInfo", JSONObject().apply {
                             put("name", "mc-browser-android")
-                            put("version", "1.0.0")
+                            put("version", BrowserMcpContract.API_VERSION)
                         })
                     })
                 }
@@ -175,20 +220,22 @@ class BrowserMcpServer(private val browserService: BrowserService) {
             "ping" -> {
                 JSONObject().apply {
                     put("jsonrpc", "2.0")
-                    put("id", params.opt("id"))
+                    put("id", id)
                     put("result", JSONObject())
                 }
             }
             "tools/list" -> {
+                requireInitialized(protocolId)
                 JSONObject().apply {
                     put("jsonrpc", "2.0")
-                    put("id", params.opt("id"))
+                    put("id", id)
                     put("result", JSONObject().apply {
                         put("tools", buildToolList())
                     })
                 }
             }
             "tools/call" -> {
+                requireInitialized(protocolId)
                 val name = params.optString("name", "")
                 val arguments = params.optJSONObject("arguments") ?: JSONObject()
                 val sessionId = getSessionId(params)
@@ -197,10 +244,10 @@ class BrowserMcpServer(private val browserService: BrowserService) {
                     val resultContent = callTool(name, arguments)
                     JSONObject().apply {
                         put("jsonrpc", "2.0")
-                        put("id", params.opt("id"))
+                        put("id", id)
                         put("result", JSONObject().apply {
-                            put("content", resultContent)
-                            put("isError", false)
+                            put("content", resultContent.first)
+                            put("isError", resultContent.second)
                         })
                     }
                 }
@@ -208,7 +255,7 @@ class BrowserMcpServer(private val browserService: BrowserService) {
             else -> {
                 JSONObject().apply {
                     put("jsonrpc", "2.0")
-                    put("id", params.opt("id"))
+                    put("id", id)
                     put("error", JSONObject().apply {
                         put("code", -32601)
                         put("message", "method not found: $method")
@@ -218,8 +265,9 @@ class BrowserMcpServer(private val browserService: BrowserService) {
         }
     }
 
-    private fun callTool(name: String, args: JSONObject): JSONArray {
+    private fun callTool(name: String, args: JSONObject): Pair<JSONArray, Boolean> {
         val result = JSONArray()
+        var isError = false
         try {
             when (name) {
                 "browser_navigate" -> {
@@ -296,19 +344,17 @@ class BrowserMcpServer(private val browserService: BrowserService) {
                     })
                 }
                 else -> {
-                    result.put(JSONObject().apply {
-                        put("type", "text")
-                        put("text", "未知工具: $name")
-                    })
+                    throw IllegalArgumentException("未知工具: $name")
                 }
             }
         } catch (e: Exception) {
+            isError = true
             result.put(JSONObject().apply {
                 put("type", "text")
                 put("text", "错误: ${e.message}")
             })
         }
-        return result
+        return result to isError
     }
 
     private fun buildToolList(): JSONArray {
@@ -454,10 +500,24 @@ class BrowserMcpServer(private val browserService: BrowserService) {
         return tools
     }
 
-    private fun createSession(): String {
+    private fun createSession(protocolVersion: String): String {
         val id = UUID.randomUUID().toString().take(8)
-        sessions[id] = McpProtocolSession(id)
+        sessions[id] = McpProtocolSession(id, protocolVersion)
         return id
+    }
+
+    private fun requireInitialized(protocolId: String) {
+        val session = sessions[protocolId] ?: throw IllegalStateException("MCP 会话已关闭")
+        check(session.initialized.get()) { "MCP 会话尚未收到 notifications/initialized" }
+    }
+
+    private fun rpcError(id: Any?, code: Int, message: String) = JSONObject().apply {
+        put("jsonrpc", "2.0")
+        put("id", id ?: JSONObject.NULL)
+        put("error", JSONObject().apply {
+            put("code", code)
+            put("message", message)
+        })
     }
 
     private fun getOrCreateContext(protocolId: String, agentId: String?): McpCallContext {
@@ -477,25 +537,33 @@ class BrowserMcpServer(private val browserService: BrowserService) {
 
     data class HttpRequest(
         val method: String,
+        val path: String,
         val bearerToken: String?,
         val mcpSessionId: String?,
+        val mcpProtocolVersion: String?,
         val body: String
     )
 
     private fun readHttpRequest(socket: Socket): HttpRequest? {
         try {
             socket.soTimeout = 30000
-            val reader = BufferedReader(InputStreamReader(socket.getInputStream(), "UTF-8"))
-            var line = reader.readLine() ?: return null
+            val input = BufferedInputStream(socket.getInputStream())
+            var headerBytes = 0
+            var line = readAsciiLine(input) ?: return null
+            headerBytes += line.length + 2
             val parts = line.split(" ")
-            if (parts.size < 2) return null
+            if (parts.size < 3) return null
             val method = parts[0]
+            val path = parts[1].substringBefore('?')
             var bearerToken: String? = null
             var mcpSessionId: String? = null
+            var mcpProtocolVersion: String? = null
             var contentLength = 0
             var headerCount = 0
             while (true) {
-                line = reader.readLine() ?: break
+                line = readAsciiLine(input) ?: return null
+                headerBytes += line.length + 2
+                if (headerBytes > MAX_HEADER_BYTES) return null
                 if (line.isEmpty()) break
                 if (++headerCount > 100) return null
                 val lower = line.lowercase()
@@ -504,22 +572,44 @@ class BrowserMcpServer(private val browserService: BrowserService) {
                 }
                 if (lower.startsWith("authorization:")) {
                     val value = line.substringAfter(":").trim()
-                    bearerToken = value.removePrefix("Bearer ")
+                    bearerToken = BrowserMcpContract.parseBearer(value)
                 }
                 if (lower.startsWith("mcp-session-id:")) {
                     mcpSessionId = line.substringAfter(":").trim().takeIf { it.isNotEmpty() }
                 }
+                if (lower.startsWith("mcp-protocol-version:")) {
+                    mcpProtocolVersion = line.substringAfter(":").trim().takeIf { it.isNotEmpty() }
+                }
             }
-            if (contentLength > MAX_BODY_BYTES) return null
+            if (contentLength < 0 || contentLength > MAX_BODY_BYTES) return null
             val body = if (contentLength > 0) {
-                val buf = CharArray(contentLength)
-                reader.read(buf, 0, contentLength)
-                String(buf)
+                val bytes = ByteArray(contentLength)
+                var offset = 0
+                while (offset < contentLength) {
+                    val read = input.read(bytes, offset, contentLength - offset)
+                    if (read < 0) return null
+                    offset += read
+                }
+                String(bytes, Charsets.UTF_8)
             } else ""
-            return HttpRequest(method, bearerToken, mcpSessionId, body)
+            return HttpRequest(method, path, bearerToken, mcpSessionId, mcpProtocolVersion, body)
         } catch (e: Exception) {
             return null
         }
+    }
+
+    private fun readAsciiLine(input: BufferedInputStream): String? {
+        val bytes = ArrayList<Byte>()
+        while (bytes.size <= MAX_HEADER_BYTES) {
+            val value = input.read()
+            if (value < 0) return if (bytes.isEmpty()) null else String(bytes.toByteArray(), Charsets.US_ASCII)
+            if (value == '\n'.code) {
+                if (bytes.lastOrNull() == '\r'.code.toByte()) bytes.removeAt(bytes.lastIndex)
+                return String(bytes.toByteArray(), Charsets.US_ASCII)
+            }
+            bytes.add(value.toByte())
+        }
+        return null
     }
 
     private fun sendHttp(socket: Socket, status: Int, contentType: String, body: String, sessionId: String?) {
@@ -528,6 +618,7 @@ class BrowserMcpServer(private val browserService: BrowserService) {
             val reason = when (status) {
                 200 -> "OK"
                 202 -> "Accepted"
+                204 -> "No Content"
                 400 -> "Bad Request"
                 401 -> "Unauthorized"
                 404 -> "Not Found"
@@ -539,6 +630,8 @@ class BrowserMcpServer(private val browserService: BrowserService) {
             val sessionHeader = sessionId?.let { "Mcp-Session-Id: $it\r\n" } ?: ""
             writer.write("HTTP/1.1 $status $reason\r\n")
             writer.write("Content-Type: $contentType\r\n")
+            writer.write("X-MonkeyCode-Browser-API-Version: ${BrowserMcpContract.API_VERSION}\r\n")
+            sessionId?.let { sessions[it]?.protocolVersion }?.let { writer.write("MCP-Protocol-Version: $it\r\n") }
             writer.write(sessionHeader)
             writer.write("Content-Length: ${body.toByteArray(Charsets.UTF_8).size}\r\n")
             writer.write("Connection: close\r\n")

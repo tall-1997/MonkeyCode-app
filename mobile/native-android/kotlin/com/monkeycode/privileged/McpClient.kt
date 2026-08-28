@@ -22,7 +22,8 @@ class McpClient(private val context: Context) {
     data class McpServerConfig(
         val name: String,
         val url: String,
-        val enabled: Boolean = true
+        val enabled: Boolean = true,
+        val headers: Map<String, String> = emptyMap()
     )
 
     data class McpTool(
@@ -34,6 +35,9 @@ class McpClient(private val context: Context) {
 
     private val servers = mutableListOf<McpServerConfig>()
     private val tools = ConcurrentHashMap<String, McpTool>()
+    private val sessionIds = ConcurrentHashMap<String, String>()
+    private val protocolVersions = ConcurrentHashMap<String, String>()
+    private val initialized = ConcurrentHashMap.newKeySet<String>()
 
     init {
         loadConfig()
@@ -70,8 +74,15 @@ class McpClient(private val context: Context) {
                     if (server != null) {
                         val url = server.optString("url", "")
                         val enabled = server.optBoolean("enabled", true)
+                        val headers = mutableMapOf<String, String>()
+                        server.optJSONObject("headers")?.let { configured ->
+                            configured.keys().forEach { key -> headers[key] = configured.optString(key) }
+                        }
+                        server.optString("token").takeIf { it.isNotBlank() }?.let {
+                            headers.putIfAbsent("Authorization", "Bearer $it")
+                        }
                         if (url.isNotEmpty()) {
-                            servers.add(McpServerConfig(name, url, enabled))
+                            servers.add(McpServerConfig(name, url, enabled, headers))
                         }
                     }
                 }
@@ -85,7 +96,8 @@ class McpClient(private val context: Context) {
         for (server in servers) {
             if (!server.enabled) continue
             try {
-                val response = sendMcpRequest(server.url, "tools/list", JSONObject())
+                ensureInitialized(server)
+                val response = sendMcpRequest(server, "tools/list", JSONObject())
                 val result = response?.optJSONObject("result")
                 val toolsList = result?.optJSONArray("tools")
                 if (toolsList != null) {
@@ -117,7 +129,8 @@ class McpClient(private val context: Context) {
                 put("name", toolName)
                 put("arguments", arguments)
             }
-            val response = sendMcpRequest(server.url, "tools/call", params)
+            ensureInitialized(server)
+            val response = sendMcpRequest(server, "tools/call", params)
             val result = response?.optJSONObject("result")
             val content = result?.optJSONArray("content")
             if (content != null) {
@@ -134,6 +147,11 @@ class McpClient(private val context: Context) {
         }
     }
 
+    fun callRegisteredTool(registeredName: String, arguments: JSONObject): String {
+        val tool = tools[registeredName] ?: return "MCP 工具未找到: $registeredName"
+        return callTool(tool.serverName, tool.name, arguments)
+    }
+
     fun registerToolsToCatalog(catalog: AgentRuntime.ToolCatalog) {
         for ((key, tool) in tools) {
             // 将 MCP 工具 inputSchema 适配为 OpenAI function 格式
@@ -141,14 +159,57 @@ class McpClient(private val context: Context) {
         }
     }
 
-    private fun sendMcpRequest(serverUrl: String, method: String, params: JSONObject): JSONObject? {
-        val url = URL(serverUrl.trimEnd('/'))
-        val conn = url.openConnection() as HttpURLConnection
+    private fun ensureInitialized(server: McpServerConfig) {
+        if (initialized.contains(server.name)) return
+        synchronized(initialized) {
+            if (initialized.contains(server.name)) return
+            val response = sendMcpRequest(server, "initialize", JSONObject().apply {
+                put("protocolVersion", "2025-03-26")
+                put("capabilities", JSONObject())
+                put("clientInfo", JSONObject().apply {
+                    put("name", "monkeycode-mobile")
+                    put("version", "1.0")
+                })
+            }) ?: throw IllegalStateException("MCP initialize 失败: ${server.name}")
+            if (response.has("error")) throw IllegalStateException(response.getJSONObject("error").optString("message"))
+            response.optJSONObject("result")?.optString("protocolVersion")
+                ?.takeIf { it.isNotBlank() }
+                ?.let { protocolVersions[server.name] = it }
+            sendMcpNotification(server, "notifications/initialized")
+            initialized.add(server.name)
+        }
+    }
+
+    private fun configureConnection(conn: HttpURLConnection, server: McpServerConfig) {
         conn.requestMethod = "POST"
         conn.setRequestProperty("Content-Type", "application/json")
+        conn.setRequestProperty("Accept", "application/json, text/event-stream")
+        server.headers.forEach { (name, value) -> conn.setRequestProperty(name, value) }
+        sessionIds[server.name]?.let { conn.setRequestProperty("Mcp-Session-Id", it) }
+        protocolVersions[server.name]?.let { conn.setRequestProperty("MCP-Protocol-Version", it) }
         conn.doOutput = true
         conn.connectTimeout = 10000
         conn.readTimeout = 30000
+    }
+
+    private fun sendMcpNotification(server: McpServerConfig, method: String) {
+        val conn = URL(server.url.trimEnd('/')).openConnection() as HttpURLConnection
+        configureConnection(conn, server)
+        try {
+            conn.outputStream.use { it.write(JSONObject().apply {
+                put("jsonrpc", "2.0"); put("method", method)
+            }.toString().toByteArray()) }
+            conn.responseCode
+            conn.getHeaderField("Mcp-Session-Id")?.let { sessionIds[server.name] = it }
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun sendMcpRequest(server: McpServerConfig, method: String, params: JSONObject): JSONObject? {
+        val url = URL(server.url.trimEnd('/'))
+        val conn = url.openConnection() as HttpURLConnection
+        configureConnection(conn, server)
 
         val body = JSONObject().apply {
             put("jsonrpc", "2.0")
@@ -167,7 +228,11 @@ class McpClient(private val context: Context) {
                 return null
             }
 
-            val resp = conn.inputStream.bufferedReader().readText()
+            conn.getHeaderField("Mcp-Session-Id")?.let { sessionIds[server.name] = it }
+            val raw = conn.inputStream.bufferedReader().readText()
+            val resp = if (conn.contentType?.startsWith("text/event-stream") == true) {
+                raw.lineSequence().firstOrNull { it.startsWith("data:") }?.removePrefix("data:")?.trim() ?: return null
+            } else raw
             conn.disconnect()
             return JSONObject(resp)
         } catch (e: Exception) {

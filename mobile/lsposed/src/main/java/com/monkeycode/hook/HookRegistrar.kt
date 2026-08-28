@@ -1,48 +1,59 @@
 package com.monkeycode.hook
 
 import android.util.Log
+import io.github.libxposed.api.XposedInterface
+import io.github.libxposed.api.XposedModule
+import java.lang.reflect.Executable
+import java.lang.reflect.Method
+import java.util.concurrent.ConcurrentHashMap
 
-/**
- * Hook 安装注册与诊断（对齐 Eta HookRegistrar）：
- *  - 每个 Hook 使用稳定 ID
- *  - 安装结果区分 INSTALLED / MISSING / FAILED / SKIPPED
- *  - 目标签名漂移（ROM / App 升级）时记录缺失，便于定位
- */
-object HookRegistrar {
+internal enum class InstallState { INSTALLED, MISSING, FAILED, REJECTED }
 
-    enum class Result { INSTALLED, MISSING, FAILED, SKIPPED }
+internal object HookRegistrar {
+    private const val DIAGNOSTIC_PRIORITY = XposedInterface.PRIORITY_LOWEST + 102
+    private val handles = ConcurrentHashMap<String, XposedInterface.HookHandle>()
+    private val reports = ConcurrentHashMap<String, String>()
 
-    private val results = mutableMapOf<String, Result>()
+    fun install(
+        module: XposedModule,
+        id: String,
+        executable: Executable?,
+        hooker: XposedInterface.Hooker,
+    ) {
+        if (executable == null) {
+            record(id, InstallState.MISSING, "target signature unavailable; native behavior retained")
+            return
+        }
 
-    @Synchronized
-    fun record(id: String, result: Result, detail: String = "") {
-        results[id] = result
-        when (result) {
-            Result.INSTALLED -> Log.i(ModuleMain.TAG, "[$id] installed")
-            Result.MISSING -> Log.w(ModuleMain.TAG, "[$id] missing target: $detail")
-            Result.FAILED -> Log.e(ModuleMain.TAG, "[$id] failed: $detail")
-            Result.SKIPPED -> Log.i(ModuleMain.TAG, "[$id] skipped")
+        try {
+            val handle = module.hook(executable)
+                .setId(id)
+                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                .setPriority(DIAGNOSTIC_PRIORITY)
+                .intercept(hooker)
+            handles[id] = handle
+            record(id, InstallState.INSTALLED, "priority=$DIAGNOSTIC_PRIORITY, mode=PROTECTIVE")
+        } catch (error: Throwable) {
+            record(id, InstallState.FAILED, "${error.javaClass.simpleName}; native behavior retained")
+            module.log(Log.ERROR, ModuleMain.TAG, "hook installation failed: $id", error)
         }
     }
 
-    @Synchronized
-    fun summary(): String = results.entries.joinToString(", ") { "${it.key}=${it.value}" }
-
-    @Synchronized
-    fun has(id: String): Boolean = results[id] == Result.INSTALLED
-}
-
-/** 安全反射工具：目标类可能因 ROM 版本不同而缺失。 */
-internal object Reflect {
-    fun tryClass(name: String, loader: ClassLoader): Class<*>? {
-        return try { Class.forName(name, false, loader) } catch (e: Throwable) { null }
+    fun record(id: String, state: InstallState, detail: String = "") {
+        reports[id] = if (detail.isEmpty()) state.name else "${state.name}($detail)"
+        val priority = if (state == InstallState.FAILED) Log.ERROR else Log.INFO
+        Log.println(priority, ModuleMain.TAG, "[$id] ${reports[id]}")
     }
 
-    /** 反射查找方法，params 允许为 null（ROM 差异缺失类）；null 参数被过滤。 */
-    fun tryMethod(cls: Class<*>, name: String, vararg params: Class<*>?): java.lang.reflect.Method? {
-        return try {
-            val filtered = params.filterNotNull().toTypedArray()
-            cls.getDeclaredMethod(name, *filtered)
-        } catch (e: Throwable) { null }
+    fun summary(): String = reports.toSortedMap().entries.joinToString(", ") { "${it.key}=${it.value}" }
+}
+
+internal object Reflect {
+    fun method(className: String, loader: ClassLoader, methodName: String): Method? = try {
+        Class.forName(className, false, loader).getDeclaredMethod(methodName)
+    } catch (_: ReflectiveOperationException) {
+        null
+    } catch (_: LinkageError) {
+        null
     }
 }

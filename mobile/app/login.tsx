@@ -1,5 +1,6 @@
 import * as AppleAuthentication from 'expo-apple-authentication';
 import { StatusBar } from 'expo-status-bar';
+import { useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, AppState, Image, KeyboardAvoidingView, Linking, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -102,6 +103,7 @@ async function readResponseError(res: Response, fallback: string): Promise<strin
 
 export default function LoginScreen() {
   const t = useTheme();
+  const router = useRouter();
   const {
     login,
     loginWithApple,
@@ -757,10 +759,14 @@ export default function LoginScreen() {
           </View>
         </View>
 
-        <Text style={{ marginTop: 32, fontSize: 30, fontWeight: '800', color: '#FFFFFF', letterSpacing: 0 }}>欢迎回来 👋</Text>
-        <Text style={{ marginTop: 8, fontSize: 14.5, fontWeight: '500', color: 'rgba(255,255,255,0.85)' }}>登录以继续你的智能开发之旅</Text>
+        <Text style={{ marginTop: 32, fontSize: 30, fontWeight: '800', color: '#FFFFFF', letterSpacing: 0 }}>连接云端账户</Text>
+        <Text style={{ marginTop: 8, fontSize: 14.5, fontWeight: '500', color: 'rgba(255,255,255,0.85)' }}>同步远程项目、任务与账户权益</Text>
 
-        <View style={[{ marginTop: 30, backgroundColor: sheetBg, borderRadius: 26, paddingTop: 22, paddingHorizontal: 22, paddingBottom: 24, gap: 15 }, loginShadow]}>
+        <Pressable onPress={() => router.replace('/(tabs)/tasks')} style={({ pressed }) => [{ minHeight: 52, marginTop: 22, borderRadius: 16, backgroundColor: 'rgba(255,255,255,0.16)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.3)', alignItems: 'center', justifyContent: 'center' }, pressed && { opacity: 0.78 }]}>
+          <Text style={{ color: '#FFFFFF', fontSize: 15, fontWeight: '800' }}>继续使用本机功能</Text>
+        </Pressable>
+
+        <View style={[{ marginTop: 18, backgroundColor: sheetBg, borderRadius: 26, paddingTop: 22, paddingHorizontal: 22, paddingBottom: 24, gap: 15 }, loginShadow]}>
           {view === 'phone' && cloud ? (
             <>
               <Pressable onPress={() => { setError(''); setOAuthPhoneToken(''); setView('password'); }} hitSlop={8} style={{ flexDirection: 'row', alignItems: 'center', gap: 4, alignSelf: 'flex-start' }}>

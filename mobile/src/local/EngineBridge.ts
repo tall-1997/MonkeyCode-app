@@ -1,5 +1,4 @@
 import { DeviceEventEmitter, NativeModules } from 'react-native';
-import { permissionDetector } from './PermissionDetector';
 import * as ExpoFileSystem from 'expo-file-system';
 import { Paths } from 'expo-file-system';
 
@@ -21,6 +20,7 @@ export interface EngineConfig {
     maxOutput: number;
     supportsImages: boolean;
     thinking: { enabled: boolean; effort: string };
+    interfaceType?: 'openai_chat' | 'openai_responses' | 'anthropic';
   };
   systemPrompt?: string;
   initialInput?: string;
@@ -122,8 +122,10 @@ class EngineBridge {
         };
         this.frameListeners.forEach((l) => l(frame));
       });
-      this._statusSub = DeviceEventEmitter.addListener('engineStatus', (status: EngineStatus) => {
+      this._statusSub = DeviceEventEmitter.addListener('engineStatus', (event: EngineStatus | (EngineStatusDetail & { status: EngineStatus })) => {
+        const status = typeof event === 'string' ? event : event.status;
         this.status = status;
+        if (typeof event === 'object') this.setStatusDetail(event);
         this.statusListeners.forEach((l) => l(status));
       });
     }
@@ -415,13 +417,19 @@ class EngineBridge {
         kind: 'end',
         timestamp: now,
         seq: 0,
-        data: null,
+        data: { status: 'error' },
       });
     });
   }
 }
 
 export const engineBridge = new EngineBridge();
+
+export const approvePermission = (permissionId: string, remember = false): Promise<void> =>
+  engineBridge.approvePermission(permissionId, remember);
+
+export const denyPermission = (permissionId: string): Promise<void> =>
+  engineBridge.denyPermission(permissionId);
 
 /** native 侧 data 可能是 JSON 字符串（应被解析）或已反序列化的对象 */
 function normalizeFrameData(data: any): any {

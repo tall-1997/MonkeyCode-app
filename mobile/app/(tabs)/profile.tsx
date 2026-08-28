@@ -311,7 +311,7 @@ export default function ProfileScreen() {
   const t = useTheme();
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { user, baseUrl, logout, deleteAccount, appleSession, refreshUser } = useAuth();
+  const { authenticated, user, baseUrl, logout, deleteAccount, appleSession, refreshUser } = useAuth();
   const [busy, setBusy] = useState(false);
   const [wallet, setWallet] = useState<Wallet | null>(null);
   const [subscription, setSubscription] = useState<Subscription | null>(null);
@@ -329,6 +329,7 @@ export default function ProfileScreen() {
 
   useFocusEffect(
     useCallback(() => {
+      if (!authenticated) { setLoadingWallet(false); return undefined; }
       let active = true;
       Promise.allSettled([refreshUser(), getWallet(), getSubscription(), listInvitations(), getCheckinStatus()]).then(([, w, s, inv, c]) => {
         if (!active) return;
@@ -339,7 +340,7 @@ export default function ProfileScreen() {
         setLoadingWallet(false);
       });
       return () => { active = false; };
-    }, [refreshUser]),
+    }, [authenticated, refreshUser]),
   );
 
   const showToast = useCallback((msg: string) => {
@@ -461,8 +462,31 @@ export default function ProfileScreen() {
         <BigTitle title="我的" />
 
         <View style={{ paddingHorizontal: spacing.pad, paddingTop: 12, gap: spacing.gap }}>
+          <Card style={{ padding: 16 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+              <View style={{ width: 46, height: 46, borderRadius: 14, backgroundColor: t.acGhost, alignItems: 'center', justifyContent: 'center' }}><Icons.phoneDevice size={23} color={t.acTx} /></View>
+              <View style={{ flex: 1 }}><Text style={{ color: t.tx, fontSize: 16, fontWeight: '800' }}>这台设备就是工作站</Text><Text style={{ color: t.tx3, fontSize: 12.5, marginTop: 3 }}>本地 Agent · 文件系统 · 终端 · Git</Text></View>
+              <Pill color={t.acTx} bg={t.acGhost}>本机可用</Pill>
+            </View>
+          </Card>
+
+          <Card style={{ paddingTop: 14, paddingBottom: 2 }}>
+            <Text style={{ fontSize: 12, fontWeight: '700', color: t.tx3, letterSpacing: 0.5, paddingHorizontal: 16, marginBottom: 2 }}>AGENT 能力</Text>
+            <Row icon="brain" label="模型" value="本地与自定义模型" onPress={() => router.push('/models')} />
+            <Row icon="sparkle" label="Skills" value="技能与工作流" divider onPress={() => router.push('/skills')} />
+            <Row icon="file" label="Memory" value="本地长期记忆" divider />
+            <Row icon="link" label="MCP" value="工具服务连接" divider />
+            <Row icon="cube" label="沙箱" value="隔离运行环境" divider onPress={() => router.push('/sandbox-settings')} />
+          </Card>
+
+          <Card style={{ paddingTop: 14, paddingBottom: 2 }}>
+            <Text style={{ fontSize: 12, fontWeight: '700', color: t.tx3, letterSpacing: 0.5, paddingHorizontal: 16, marginBottom: 2 }}>设备能力</Text>
+            <Row icon="terminal" label="本地终端" value="Shell 与开发工具" onPress={() => router.push('/local-terminal')} />
+            <Row icon="shield" label="权限与设备控制" value="沙箱 · Root · LSPosed" divider onPress={() => router.push('/privileged-settings')} />
+          </Card>
+
           {/* identity */}
-          <Card style={{ padding: 16, flexDirection: 'row', alignItems: 'center', gap: 14 }}>
+          {authenticated ? <Card style={{ padding: 16, flexDirection: 'row', alignItems: 'center', gap: 14 }}>
             <View style={[{ width: 60, height: 60, borderRadius: 18, alignItems: 'center', justifyContent: 'center', overflow: 'hidden', backgroundColor: avatarUrl && !avatarBroken ? t.ac : t.dark ? t.bg3 : '#fff' }, t.shCard]}>
               {avatarUrl && !avatarBroken
                 ? <Image source={{ uri: avatarUrl }} onError={() => setAvatarBroken(true)} style={{ width: 60, height: 60, borderRadius: 18 }} />
@@ -488,10 +512,14 @@ export default function ProfileScreen() {
                 ) : null}
               </View>
             </View>
-          </Card>
+          </Card> : <Card onPress={() => router.push('/login')} style={{ minHeight: 74, padding: 16, flexDirection: 'row', alignItems: 'center', gap: 13 }}>
+            <View style={{ width: 42, height: 42, borderRadius: 13, backgroundColor: t.bg3, alignItems: 'center', justifyContent: 'center' }}><Icons.globe size={20} color={t.tx2} /></View>
+            <View style={{ flex: 1 }}><Text style={{ color: t.tx, fontSize: 15, fontWeight: '700' }}>连接云端账户</Text><Text style={{ color: t.tx3, fontSize: 12, marginTop: 4 }}>同步远程项目与任务，可选</Text></View>
+            <Icons.chevron size={16} color={t.tx3} />
+          </Card>}
 
           {/* 积分：余额 + 每日签到 + 邀请 */}
-          <Card style={{ padding: 16 }}>
+          {authenticated ? <><Card style={{ padding: 16 }}>
             {/* 第一行：余额 + 签到（主行动） */}
             <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
               <View style={{ flex: 1, minWidth: 0 }}>
@@ -529,7 +557,7 @@ export default function ProfileScreen() {
             </View>
             <Text style={{ paddingTop: 8, paddingBottom: 2, fontSize: 12, fontWeight: '700', color: t.tx3, letterSpacing: 0.5 }}>今日额度</Text>
             <QuotaBar name="免费模型" total={dailyTokenLimit} remaining={dailyTokenRemaining} t={t} />
-          </Card>
+          </Card></> : null}
 
           {/* 代码仓库与模型管理入口 */}
           <Card style={{ paddingTop: 14, paddingBottom: 2 }}>
@@ -554,10 +582,10 @@ export default function ProfileScreen() {
           <About t={t} />
 
           {/* logout */}
-          <Pressable onPress={onLogout} disabled={busy} style={({ pressed }) => [{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 9, paddingVertical: 15, borderRadius: 18, backgroundColor: t.bg2 }, t.shCard, pressed && { opacity: 0.7 }]}>
+          {authenticated ? <Pressable onPress={onLogout} disabled={busy} style={({ pressed }) => [{ minHeight: 50, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 9, paddingVertical: 15, borderRadius: 18, backgroundColor: t.bg2 }, t.shCard, pressed && { opacity: 0.7 }]}>
             <Icons.logout size={19} color={t.red} sw={1.9} />
             <Text style={{ color: t.red, fontSize: 15.5, fontWeight: '600' }}>退出登录</Text>
-          </Pressable>
+          </Pressable> : null}
           {/* 注销账号：Apple 登录的配套能力（审核要求支持建号必须支持删号），
               只对 Apple 登录的会话显示；其余账号体系不在 App 内删号，后端同样拦截 */}
           {appleSession ? (

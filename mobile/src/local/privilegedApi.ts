@@ -87,6 +87,11 @@ export const privilegedApi = {
     return PrivilegedExecution.execUbuntuCommand(command);
   },
 
+  execSandbox: (command: string): Promise<ShellResult> => {
+    if (!PrivilegedExecution) return Promise.reject(new Error('特权模块不可用'));
+    return PrivilegedExecution.execSandboxCommand(command);
+  },
+
   listDirectory: (path: string) => {
     if (!PrivilegedExecution) return Promise.reject(new Error('特权模块不可用'));
     return PrivilegedExecution.listDirectory(path);
@@ -226,12 +231,12 @@ export const privilegedApi = {
 
   isUbuntuInstalled: (): Promise<boolean> => {
     if (!PrivilegedExecution) return Promise.resolve(false);
-    return PrivilegedExecution.isUbuntuInstalled();
+    return PrivilegedExecution.getUbuntuStatus().then((status: { installed: boolean }) => status.installed);
   },
 
   installUbuntu: (): Promise<{ success: boolean }> => {
     if (!PrivilegedExecution) return Promise.reject(new Error('特权模块不可用'));
-    return PrivilegedExecution.installUbuntuEnvironment();
+    return PrivilegedExecution.installUbuntu();
   },
 
   getUbuntuStatus: (): Promise<{ installed: boolean; installing: boolean }> => {
@@ -247,6 +252,16 @@ export const privilegedApi = {
   getSandboxType: (): Promise<'ubuntu' | 'alpine'> => {
     if (!PrivilegedExecution) return Promise.resolve('alpine');
     return PrivilegedExecution.getSandboxType();
+  },
+
+  approvePermission: (permissionId: string, remember = false): Promise<boolean> => {
+    if (!PrivilegedExecution) return Promise.reject(new Error('特权模块不可用'));
+    return PrivilegedExecution.approvePermission(permissionId, remember);
+  },
+
+  denyPermission: (permissionId: string): Promise<boolean> => {
+    if (!PrivilegedExecution) return Promise.reject(new Error('特权模块不可用'));
+    return PrivilegedExecution.denyPermission(permissionId);
   },
 };
 

@@ -7,22 +7,27 @@ import { Glass } from '@/components/glass';
 import { Icons } from '@/components/Icons';
 import { PickerSheet, type PickerOption } from '@/components/ui';
 import { useTheme } from '@/theme';
+import { useAuth } from '@/auth/AuthContext';
 
 const TAB_META: Record<string, { label: string; icon: string }> = {
-  tasks: { label: '任务', icon: 'tasks' },
+  tasks: { label: 'Agent', icon: 'robot' },
   projects: { label: '项目', icon: 'folder' },
+  activity: { label: '动态', icon: 'clock' },
   profile: { label: '我的', icon: 'user' },
 };
 
 const CREATE_OPTIONS: PickerOption[] = [
-  { key: 'cloud', title: '云端 · 新建任务', sub: '由云端 AI 在远程仓执行', icon: 'sparkle' },
-  { key: 'local', title: '本地 · 新建项目', sub: '在设备上创建/克隆项目', icon: 'folder' },
+  { key: 'task', title: '本地任务', sub: '在当前设备启动 Agent', icon: 'robot' },
+  { key: 'project', title: '本地项目', sub: '创建本机工作区', icon: 'folder' },
+  { key: 'clone', title: 'Git 克隆', sub: '克隆仓库到本机', icon: 'git' },
+  { key: 'cloud', title: '云端任务', sub: '登录后使用远程执行', icon: 'sparkle' },
 ];
 
 function GlassDock({ state, navigation }: { state: any; navigation: any }) {
   const t = useTheme();
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const { authenticated } = useAuth();
   const [createOpen, setCreateOpen] = useState(false);
   return (
     <View pointerEvents="box-none" style={{ position: 'absolute', left: 0, right: 0, bottom: insets.bottom + 8, alignItems: 'center' }}>
@@ -59,8 +64,10 @@ function GlassDock({ state, navigation }: { state: any; navigation: any }) {
         options={CREATE_OPTIONS}
         onPick={(key) => {
           setCreateOpen(false);
-          if (key === 'local') router.push('/local-project-create');
-          else router.push('/new-task');
+          if (key === 'task') router.push('/local-agent');
+          else if (key === 'project') router.push('/local-project-create');
+          else if (key === 'clone') router.push({ pathname: '/local-project-create', params: { mode: 'clone' } });
+          else router.push(authenticated ? '/new-task' : '/login');
         }}
         onClose={() => setCreateOpen(false)}
       />
@@ -78,6 +85,7 @@ export default function TabsLayout() {
       <Tabs tabBar={(props) => <GlassDock {...(props as any)} />} screenOptions={{ headerShown: false }}>
         <Tabs.Screen name="tasks" />
         <Tabs.Screen name="projects" />
+        <Tabs.Screen name="activity" />
         <Tabs.Screen name="profile" />
       </Tabs>
       <AiConsentModal

@@ -68,11 +68,8 @@ class TerminalBridge {
       throw new Error('Terminal is only available in privileged mode');
     }
 
-    if (environment === 'ubuntu') {
-      return PrivilegedExecution.execUbuntuCommand(command);
-    }
-    if (environment === 'linux') {
-      return PrivilegedExecution.execAlpineCommand(command);
+    if (environment === 'ubuntu' || environment === 'linux') {
+      return PrivilegedExecution.execSandboxCommand(command);
     }
     return PrivilegedExecution.execCommand(command, identity);
   }

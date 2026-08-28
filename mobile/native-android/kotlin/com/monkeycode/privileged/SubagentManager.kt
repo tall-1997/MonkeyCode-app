@@ -54,7 +54,8 @@ class SubagentManager(
         val writePaths: List<String> = emptyList(),
         val model: String? = null,
         val baseUrl: String? = null,
-        val apiKey: String? = null
+        val apiKey: String? = null,
+        val interfaceType: String? = null
     )
 
     inner class SubagentState(
@@ -86,7 +87,15 @@ class SubagentManager(
         val state = SubagentState(id, parentSessionId, config)
         subagents[id] = state
 
-        onFrame(JSONObject().apply {
+        val emit: (JSONObject) -> Unit = { frame ->
+            val data = frame.optJSONObject("data")
+            if (frame.optString("kind") == "acp_event" && data?.has("sessionUpdate") == true) {
+                frame.put("data", JSONObject().put("update", data))
+            }
+            onFrame(frame)
+        }
+
+        emit(JSONObject().apply {
             put("type", "task-running")
             put("kind", "acp_event")
             put("data", JSONObject().apply {
@@ -103,11 +112,11 @@ class SubagentManager(
 
         Thread {
             try {
-                executeSubagent(state, onFrame, onError)
+                executeSubagent(state, emit, onError)
             } catch (e: Exception) {
                 state.status = "failed"
                 state.error = e.message
-                onFrame(JSONObject().apply {
+                emit(JSONObject().apply {
                     put("type", "task-running")
                     put("kind", "acp_event")
                     put("data", JSONObject().apply {
@@ -123,7 +132,7 @@ class SubagentManager(
                 activeCount.decrementAndGet()
                 subagents.remove(id)
 
-                onFrame(JSONObject().apply {
+                emit(JSONObject().apply {
                     put("type", "task-running")
                     put("kind", "acp_event")
                     put("data", JSONObject().apply {
@@ -155,7 +164,20 @@ class SubagentManager(
     ) {
         val config = state.config
         val transcript = AgentRuntime.TranscriptBuilder()
-        val toolCatalog = AgentRuntime.ToolCatalog()
+        val toolCatalog = AgentRuntime.ToolCatalog().apply {
+            addTool("read_file", "读取工作区文件", objectSchema("path", "string"))
+            addTool("list_directory", "列出工作区目录", objectSchema("path", "string"))
+            if (config.type == SubagentType.WORKER && config.writePaths.isNotEmpty()) {
+                addTool("write_file", "写入授权目录内文件", JSONObject().apply {
+                    put("type", "object")
+                    put("properties", JSONObject().apply {
+                        put("path", JSONObject().put("type", "string"))
+                        put("content", JSONObject().put("type", "string"))
+                    })
+                    put("required", JSONArray(listOf("path", "content")))
+                })
+            }
+        }
 
         if (config.systemPrompt.isNotEmpty()) {
             transcript.addSystem(config.systemPrompt)
@@ -169,6 +191,7 @@ class SubagentManager(
             model = config.model ?: "deepseek-chat",
             baseUrl = config.baseUrl ?: "https://api.deepseek.com/v1",
             apiKey = config.apiKey ?: "",
+            interfaceType = config.interfaceType ?: "openai_chat",
             systemPrompt = "",
             initialInput = "",
             maxTurns = config.maxTurns,
@@ -215,7 +238,28 @@ class SubagentManager(
                 })
             }
 
-            transcript.addAssistant(content, null)
+            val toolCalls = message.optJSONArray("tool_calls")
+            transcript.addAssistant(content, toolCalls)
+
+            if (toolCalls != null && toolCalls.length() > 0) {
+                for (i in 0 until toolCalls.length()) {
+                    val call = toolCalls.getJSONObject(i)
+                    val function = call.optJSONObject("function") ?: continue
+                    val name = function.optString("name")
+                    val args = function.optString("arguments", "{}")
+                    val result = if (name == "write_file" && !isAuthorizedWrite(args, config.writePaths)) {
+                        "错误: 子代理写入路径超出授权目录"
+                    } else agentRuntime.executeSubagentTool(
+                            state.parentSessionId, name, args, onFrame, onError
+                        )
+                    transcript.addToolResult(call.optString("id"), name, result)
+                    onFrame(frame("subagent_tool", state).apply {
+                        getJSONObject("data").getJSONObject("update").put("toolCallId", call.optString("id"))
+                            .put("title", name).put("status", "completed").put("rawOutput", result)
+                    })
+                }
+                continue
+            }
 
             if (finishReason == "stop") {
                 state.status = "completed"
@@ -234,7 +278,6 @@ class SubagentManager(
                 return
             }
 
-            // 子代理不执行工具调用，只做文本分析
             break
         }
 
@@ -242,7 +285,33 @@ class SubagentManager(
         state.result = "子代理完成 (${state.turnCount} 轮)"
     }
 
+    private fun isAuthorizedWrite(args: String, writePaths: List<String>): Boolean = try {
+        val path = JSONObject(args).optString("path")
+        writePaths.any { agentRuntime.isPathInside(path, it) }
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun frame(update: String, state: SubagentState): JSONObject = JSONObject().apply {
+        put("type", "task-running")
+        put("kind", "acp_event")
+        put("data", JSONObject().apply {
+            put("update", JSONObject().apply {
+                put("sessionUpdate", update)
+                put("childSessionId", state.id)
+            })
+        })
+        put("timestamp", System.currentTimeMillis())
+        put("seq", state.turnCount)
+    }
+
     companion object {
+        private fun objectSchema(name: String, type: String): JSONObject = JSONObject().apply {
+            put("type", "object")
+            put("properties", JSONObject().put(name, JSONObject().put("type", type)))
+            put("required", JSONArray(listOf(name)))
+        }
+
         fun buildSpawnToolSchema(): JSONObject {
             return JSONObject().apply {
                 put("type", "function")

@@ -90,7 +90,7 @@ function launchAction(st: TelemetryState, today: string): string | null {
   return st.last_day ? 'daily-launch' : 'install';
 }
 
-function useAction(st: TelemetryState, today: string): string | null {
+function selectUseAction(st: TelemetryState, today: string): string | null {
   if (st.last_used_day === today) return null;
   return st.used ? 'daily-use' : 'first-use';
 }
@@ -196,7 +196,7 @@ export async function markUsed(version: string): Promise<void> {
   if (markGuard === today) return;
   markGuard = today;
   const st = await loadState();
-  const action = useAction(st, today);
+  const action = selectUseAction(st, today);
   if (action) {
     await report(st, 'use', action, version);
   }

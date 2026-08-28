@@ -7,6 +7,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AuthProvider, useAuth } from '@/auth/AuthContext';
 import { LoadingView } from '@/components/ui';
 import { PreviewProvider } from '@/components/PreviewProvider';
+import { OfflineProvider } from '@/local/OfflineContext';
 import { ThemeProvider, useTheme } from '@/theme';
 import { applyOta, useOtaAutoUpdate } from '@/updates/useOtaUpdate';
 
@@ -16,14 +17,11 @@ function RootNav() {
   const segments = useSegments();
   const router = useRouter();
 
-  // 鉴权导航的唯一入口：未登录踢回登录页；登录成功后清掉登录屏并进入主界面。
-  // 用 dismissAll 清栈，避免登录页残留在栈底导致「登录后返回又回到登录页」。
+  // 云端登录是可选增强。登录成功后回到本地优先的 Agent 首页。
   useEffect(() => {
     if (!ready) return;
     const inAuthFlow = segments[0] === 'login';
-    if (!authenticated) {
-      if (!inAuthFlow) router.replace('/login');
-    } else if (inAuthFlow) {
+    if (authenticated && inAuthFlow) {
       if (router.canDismiss?.()) router.dismissAll();
       router.replace('/(tabs)/tasks');
     }
@@ -65,6 +63,7 @@ function RootNav() {
       <Stack.Screen name="local-terminal" />
       <Stack.Screen name="local-repo" />
       <Stack.Screen name="local-agent" />
+      <Stack.Screen name="cloud-tasks" />
     </Stack>
   );
 }
@@ -83,7 +82,9 @@ function Themed() {
     <>
       <StatusBar style={t.dark ? 'light' : 'dark'} />
       <PreviewProvider>
-        <RootNav />
+        <OfflineProvider>
+          <RootNav />
+        </OfflineProvider>
       </PreviewProvider>
     </>
   );

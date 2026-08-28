@@ -8,8 +8,10 @@ import java.io.*
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.UUID
 
 /**
  * 本地 Agent 引擎 —— 自研实现，对齐桌面端 MonkeyCode 协议规格。
@@ -67,14 +69,15 @@ class AgentRuntime(private val context: Context) {
         val id: String,
         val config: AgentConfig,
         val transcript: TranscriptBuilder,
-        val toolCatalog: ToolCatalog
+        val toolCatalog: ToolCatalog,
+        val onFrame: (JSONObject) -> Unit,
     ) {
         var status: SessionStatus = SessionStatus.CREATED
         var turnCount: Int = 0
         var toolCallCount: Int = 0
         var isCancelled: Boolean = false
         var isPaused: Boolean = false
-        val steering: MutableList<String> = mutableListOf()
+        val steering = LinkedBlockingQueue<String>()
         var engineId: String = ""
         var parentSessionId: String? = null
         var promptTokens: Long = 0
@@ -156,10 +159,10 @@ class AgentRuntime(private val context: Context) {
     }
 
     fun startSession(config: AgentConfig, onFrame: (JSONObject) -> Unit, onError: (String) -> Unit): String {
-        val sessionId = "agent_${sessionCounter.incrementAndGet()}"
+        val sessionId = "agent_${sessionCounter.incrementAndGet()}_${UUID.randomUUID()}"
         val transcript = TranscriptBuilder()
         val toolCatalog = buildToolCatalog(config.tools)
-        val session = AgentSession(sessionId, config, transcript, toolCatalog)
+        val session = AgentSession(sessionId, config, transcript, toolCatalog, onFrame)
         session.status = SessionStatus.CREATED
         sessions[sessionId] = session
 
@@ -186,7 +189,9 @@ class AgentRuntime(private val context: Context) {
                 sessionManager?.reconcile(sessionId, e.message ?: "Agent loop error")
                 onError(e.message ?: "Agent loop error")
             } finally {
-                if (session.status == SessionStatus.RUNNING) {
+                if (session.isCancelled) {
+                    session.status = SessionStatus.INTERRUPTED
+                } else if (session.status == SessionStatus.RUNNING) {
                     session.status = SessionStatus.FINISHED
                 }
                 sessionManager?.updateStatus(sessionId, SessionManager.SessionStatus.fromString(session.status.asString()))
@@ -202,15 +207,31 @@ class AgentRuntime(private val context: Context) {
         return sessionId
     }
 
-    fun cancelSession(sessionId: String) { sessions[sessionId]?.isCancelled = true }
+    fun cancelSession(sessionId: String) {
+        sessions[sessionId]?.let {
+            it.isCancelled = true
+            it.steering.offer("")
+        }
+    }
     fun pauseSession(sessionId: String) { sessions[sessionId]?.isPaused = true }
-    fun sendSteering(sessionId: String, message: String) { sessions[sessionId]?.steering?.add(message) }
+    fun sendSteering(sessionId: String, message: String) {
+        sessions[sessionId]?.let {
+            it.steering.offer(message)
+            it.isPaused = false
+            it.status = SessionStatus.RUNNING
+            sessionManager?.updateStatus(sessionId, SessionManager.SessionStatus.RUNNING)
+        }
+    }
 
     fun approvePermission(sessionId: String, permId: String, remember: Boolean = false) {
         val session = sessions[sessionId] ?: return
         session.permissionDecisions[permId] = PermOutcome.APPROVED
-        if (remember) session.permissionRemember[permId] = true
-        emitFrame(session, { sessionManager?.appendFrame(sessionId, it) }, "permission-resolved", null, JSONObject().apply {
+        if (remember) {
+            session.pendingPermissions[permId]?.optString("tool")?.takeIf { it.isNotBlank() }?.let {
+                session.permissionRemember[it] = true
+            }
+        }
+        emitFrame(session, session.onFrame, "permission-resolved", null, JSONObject().apply {
             put("id", permId)
             put("outcome", "approved")
         })
@@ -219,14 +240,21 @@ class AgentRuntime(private val context: Context) {
     fun denyPermission(sessionId: String, permId: String) {
         val session = sessions[sessionId] ?: return
         session.permissionDecisions[permId] = PermOutcome.DENIED
-        emitFrame(session, { sessionManager?.appendFrame(sessionId, it) }, "permission-resolved", null, JSONObject().apply {
+        emitFrame(session, session.onFrame, "permission-resolved", null, JSONObject().apply {
             put("id", permId)
             put("outcome", "denied")
         })
     }
 
     fun spawnAgent(config: SubagentManager.SpawnConfig, parentSessionId: String, onFrame: (JSONObject) -> Unit, onError: (String) -> Unit): String? {
-        return subagentManager?.spawn(config, parentSessionId, onFrame, onError)
+        val parent = sessions[parentSessionId]
+        val inherited = if (parent == null) config else config.copy(
+            model = config.model ?: parent.config.model,
+            baseUrl = config.baseUrl ?: parent.config.baseUrl,
+            apiKey = config.apiKey ?: parent.config.apiKey,
+            interfaceType = config.interfaceType ?: parent.config.interfaceType
+        )
+        return subagentManager?.spawn(inherited, parentSessionId, onFrame, onError)
     }
 
     private fun executeAgentLoop(
@@ -246,7 +274,7 @@ class AgentRuntime(private val context: Context) {
         }
 
         skillManager?.let { sm ->
-            val skillPrompt = sm.generateSkillSystemPrompt()
+            val skillPrompt = sm.generateSkillSystemPrompt(config.skills)
             if (skillPrompt.isNotEmpty()) {
                 transcript.addSystem(skillPrompt)
             }
@@ -259,7 +287,7 @@ class AgentRuntime(private val context: Context) {
             transcript.addUser(config.initialInput)
         }
 
-        while (session.status == SessionStatus.RUNNING &&
+        while ((session.status == SessionStatus.RUNNING || session.status == SessionStatus.IDLE) &&
             session.turnCount < config.maxTurns &&
             session.toolCallCount < config.maxToolCalls &&
             !session.isCancelled) {
@@ -267,8 +295,16 @@ class AgentRuntime(private val context: Context) {
             while (session.isPaused && !session.isCancelled) Thread.sleep(100)
             if (session.isCancelled) break
 
-            while (session.steering.isNotEmpty() && !session.isCancelled) {
-                val next = session.steering.removeAt(0)
+            if (session.status == SessionStatus.IDLE) {
+                val next = session.steering.take()
+                if (session.isCancelled) break
+                session.status = SessionStatus.RUNNING
+                sessionManager?.updateStatus(session.id, SessionManager.SessionStatus.RUNNING)
+                session.steering.offer(next)
+            }
+
+            while (!session.steering.isEmpty() && !session.isCancelled) {
+                val next = session.steering.poll() ?: break
                 if (next.isNotBlank()) {
                     emitFrame(session, onFrame, "user-input", null, JSONObject().apply {
                         put("content", b64Text(next))
@@ -283,11 +319,7 @@ class AgentRuntime(private val context: Context) {
 
             checkContextCompact(session, onFrame)
 
-            val response = if (config.streamEnabled && config.interfaceType == "openai_chat") {
-                callOpenAIChatStreaming(config, transcript.build(), session.toolCatalog.build(), session, onFrame, onError)
-            } else {
-                callLLM(config, transcript.build(), session.toolCatalog.build())
-            }
+            val response = callProviderTurn(config, transcript.build(), session.toolCatalog.build(), session, onFrame, onError)
 
             if (response == null) {
                 onError("LLM API call failed")
@@ -311,10 +343,28 @@ class AgentRuntime(private val context: Context) {
             val toolCalls = message.optJSONArray("tool_calls")
             val finishReason = choice.optString("finish_reason", "stop")
 
+            val recordedByStreaming = transcript.messages.lastOrNull()?.let {
+                it.optString("role") == "assistant" &&
+                    it.optString("content", "") == content &&
+                    (it.optJSONArray("tool_calls")?.toString() ?: "") == (toolCalls?.toString() ?: "")
+            } == true
+            if (!recordedByStreaming) {
+                transcript.addAssistant(content, toolCalls)
+                if (content.isNotEmpty()) {
+                    emitFrame(session, onFrame, "task-running", "acp_event", JSONObject().apply {
+                        put("sessionUpdate", "agent_message_chunk")
+                        put("content", JSONObject().apply {
+                            put("type", "text")
+                            put("text", content)
+                        })
+                    })
+                }
+            }
+
             if (finishReason == "stop") {
                 session.status = SessionStatus.IDLE
                 sessionManager?.updateStatus(session.id, SessionManager.SessionStatus.IDLE)
-                break
+                continue
             }
 
             if (toolCalls != null && toolCalls.length() > 0) {
@@ -347,7 +397,7 @@ class AgentRuntime(private val context: Context) {
                         put("rawInput", JSONObject(args))
                     })
 
-                    val result = executeTool(name, args)
+                    val result = executeTool(session, name, args, onFrame, onError)
                     transcript.addToolResult(toolCallId, name, result)
 
                     val resultSuccess = !result.startsWith("错误:")
@@ -494,7 +544,8 @@ class AgentRuntime(private val context: Context) {
                 }
             }
         } catch (e: Exception) {
-            return callOpenAIChat(config, messages, tools)
+            conn.disconnect()
+            throw IOException("流式响应中断", e)
         }
         conn.disconnect()
 
@@ -508,7 +559,7 @@ class AgentRuntime(private val context: Context) {
             toolCalls.put(toolCallsMap[idx])
         }
 
-        if (hasContent) {
+        if (hasContent || toolCalls.length() > 0) {
             session.transcript.addAssistant(contentBuilder.toString(), if (toolCalls.length() > 0) toolCalls else null)
         }
 
@@ -537,6 +588,19 @@ class AgentRuntime(private val context: Context) {
         }
     }
 
+    private fun callProviderTurn(
+        config: AgentConfig,
+        messages: JSONArray,
+        tools: JSONArray,
+        session: AgentSession,
+        onFrame: (JSONObject) -> Unit,
+        onError: (String) -> Unit
+    ): JSONObject? = if (config.streamEnabled && config.interfaceType == "openai_chat") {
+        callOpenAIChatStreaming(config, messages, tools, session, onFrame, onError)
+    } else {
+        callLLM(config, messages, tools)
+    }
+
     private fun callOpenAIChat(config: AgentConfig, messages: JSONArray, tools: JSONArray): JSONObject? {
         val endpoint = chatEndpointOf(config.baseUrl)
         val conn = openJsonConn(endpoint, config.apiKey)
@@ -559,6 +623,17 @@ class AgentRuntime(private val context: Context) {
         return callLLM(config, messages, tools)
     }
 
+    internal fun executeSubagentTool(
+        parentSessionId: String,
+        name: String,
+        args: String,
+        onFrame: (JSONObject) -> Unit,
+        onError: (String) -> Unit
+    ): String {
+        val parent = sessions[parentSessionId] ?: return "错误: 父会话不可用"
+        return executeTool(parent, name, args, onFrame, onError)
+    }
+
     private fun callOpenAIResponses(config: AgentConfig, messages: JSONArray, tools: JSONArray): JSONObject? {
         val base = config.baseUrl.trimEnd('/')
         val endpoint = if (base.endsWith("/v1")) "$base/responses" else "$base/v1/responses"
@@ -568,10 +643,23 @@ class AgentRuntime(private val context: Context) {
             val m = messages.getJSONObject(i)
             val role = m.optString("role", "user")
             if (role == "assistant") {
-                input.put(JSONObject().apply {
+                val content = m.optString("content", "")
+                if (content.isNotEmpty()) input.put(JSONObject().apply {
                     put("type", "message"); put("role", "assistant")
-                    put("content", JSONArray().put(JSONObject().apply { put("type", "input_text"); put("text", m.optString("content", "")) }))
+                    put("content", JSONArray().put(JSONObject().apply { put("type", "output_text"); put("text", content) }))
                 })
+                m.optJSONArray("tool_calls")?.let { calls ->
+                    for (j in 0 until calls.length()) {
+                        val call = calls.getJSONObject(j)
+                        val function = call.getJSONObject("function")
+                        input.put(JSONObject().apply {
+                            put("type", "function_call")
+                            put("call_id", call.optString("id"))
+                            put("name", function.optString("name"))
+                            put("arguments", function.optString("arguments", "{}"))
+                        })
+                    }
+                }
             } else if (role == "tool") {
                 input.put(JSONObject().apply {
                     put("type", "function_call_output")
@@ -590,7 +678,17 @@ class AgentRuntime(private val context: Context) {
             put("input", input)
             put("max_output_tokens", config.maxOutput)
             put("stream", false)
-            if (tools.length() > 0) put("tools", tools)
+            if (tools.length() > 0) put("tools", JSONArray().apply {
+                for (i in 0 until tools.length()) {
+                    val function = tools.getJSONObject(i).getJSONObject("function")
+                    put(JSONObject().apply {
+                        put("type", "function")
+                        put("name", function.optString("name"))
+                        put("description", function.optString("description"))
+                        put("parameters", function.optJSONObject("parameters") ?: JSONObject())
+                    })
+                }
+            })
         }
         writeClose(conn, body)
         if (conn.responseCode != 200) { conn.disconnect(); return null }
@@ -609,6 +707,19 @@ class AgentRuntime(private val context: Context) {
             put("model", config.model)
             put("max_tokens", config.maxOutput)
             put("messages", toAnthropicMessages(messages))
+            anthropicSystem(messages).takeIf { it.isNotBlank() }?.let { put("system", it) }
+            if (tools.length() > 0) {
+                put("tools", JSONArray().apply {
+                    for (i in 0 until tools.length()) {
+                        val function = tools.getJSONObject(i).getJSONObject("function")
+                        put(JSONObject().apply {
+                            put("name", function.optString("name"))
+                            put("description", function.optString("description"))
+                            put("input_schema", function.optJSONObject("parameters") ?: JSONObject())
+                        })
+                    }
+                })
+            }
         }
         writeClose(conn, body)
         if (conn.responseCode != 200) { conn.disconnect(); return null }
@@ -647,19 +758,40 @@ class AgentRuntime(private val context: Context) {
 
     private fun toAnthropicMessages(messages: JSONArray): JSONArray {
         val out = JSONArray()
-        var lastSystem = ""
         for (i in 0 until messages.length()) {
             val m = messages.getJSONObject(i)
             val role = m.optString("role", "user")
             when (role) {
-                "system" -> lastSystem = if (lastSystem.isBlank()) m.optString("content", "") else "$lastSystem\n${m.optString("content", "")}"
+                "system" -> Unit
+                "assistant" -> out.put(JSONObject().apply {
+                    put("role", "assistant")
+                    put("content", JSONArray().apply {
+                        m.optString("content", "").takeIf { it.isNotEmpty() }?.let { text ->
+                            put(JSONObject().apply { put("type", "text"); put("text", text) })
+                        }
+                        m.optJSONArray("tool_calls")?.let { calls ->
+                            for (j in 0 until calls.length()) {
+                                val call = calls.getJSONObject(j)
+                                val function = call.getJSONObject("function")
+                                put(JSONObject().apply {
+                                    put("type", "tool_use")
+                                    put("id", call.optString("id"))
+                                    put("name", function.optString("name"))
+                                    put("input", try { JSONObject(function.optString("arguments", "{}")) } catch (_: Exception) { JSONObject() })
+                                })
+                            }
+                        }
+                    })
+                })
                 "tool" -> {
-                    val prev = if (out.length() > 0) out.getJSONObject(out.length() - 1) else null
-                    if (prev != null && prev.optString("role") == "user") {
-                        prev.put("content", "${prev.optString("content", "")}\n\n[工具结果] ${m.optString("content", "")}")
-                    } else {
-                        out.put(JSONObject().apply { put("role", "user"); put("content", "[工具结果] ${m.optString("content", "")}") })
-                    }
+                    out.put(JSONObject().apply {
+                        put("role", "user")
+                        put("content", JSONArray().put(JSONObject().apply {
+                            put("type", "tool_result")
+                            put("tool_use_id", m.optString("tool_call_id", ""))
+                            put("content", m.optString("content", ""))
+                        }))
+                    })
                 }
                 else -> out.put(JSONObject().apply {
                     put("role", "user")
@@ -668,6 +800,16 @@ class AgentRuntime(private val context: Context) {
             }
         }
         return out
+    }
+
+    private fun anthropicSystem(messages: JSONArray): String = buildString {
+        for (i in 0 until messages.length()) {
+            val message = messages.getJSONObject(i)
+            if (message.optString("role") == "system") {
+                if (isNotEmpty()) append('\n')
+                append(message.optString("content", ""))
+            }
+        }
     }
 
     private fun responsesToChat(r: JSONObject, model: String): JSONObject {
@@ -691,7 +833,12 @@ class AgentRuntime(private val context: Context) {
                     put("type", "function")
                     put("function", JSONObject().apply {
                         put("name", it.optString("name", ""))
-                        put("arguments", it.optJSONObject("arguments")?.toString() ?: "{}")
+                        val arguments = it.opt("arguments")
+                        put("arguments", when (arguments) {
+                            is JSONObject -> arguments.toString()
+                            is String -> arguments
+                            else -> "{}"
+                        })
                     })
                 })
             }
@@ -711,17 +858,32 @@ class AgentRuntime(private val context: Context) {
 
     private fun anthropicToChat(r: JSONObject, model: String): JSONObject {
         val sb = StringBuilder()
+        val toolCalls = JSONArray()
         val content = r.optJSONArray("content") ?: JSONArray()
         for (i in 0 until content.length()) {
             val block = content.getJSONObject(i)
-            if (block.optString("type") == "text") sb.append(block.optString("text", ""))
+            when (block.optString("type")) {
+                "text" -> sb.append(block.optString("text", ""))
+                "tool_use" -> toolCalls.put(JSONObject().apply {
+                    put("id", block.optString("id", "call_$i"))
+                    put("type", "function")
+                    put("function", JSONObject().apply {
+                        put("name", block.optString("name", ""))
+                        put("arguments", (block.optJSONObject("input") ?: JSONObject()).toString())
+                    })
+                })
+            }
         }
         val stopReason = r.optString("stop_reason", "end_turn")
         val finish = if (stopReason == "tool_use") "tool_calls" else "stop"
         return JSONObject().apply {
             put("choices", JSONArray().put(JSONObject().apply {
                 put("index", 0)
-                put("message", JSONObject().apply { put("role", "assistant"); put("content", sb.toString()) })
+                put("message", JSONObject().apply {
+                    put("role", "assistant")
+                    put("content", sb.toString())
+                    if (toolCalls.length() > 0) put("tool_calls", toolCalls)
+                })
                 put("finish_reason", finish)
             }))
         }
@@ -798,14 +960,25 @@ class AgentRuntime(private val context: Context) {
         )
     }
 
+    internal fun isPathInside(path: String, root: String): Boolean {
+        if (path.isBlank() || root.isBlank()) return false
+        return try {
+            val canonicalRoot = File(root).canonicalFile
+            val canonicalPath = File(path).canonicalFile
+            canonicalPath == canonicalRoot || canonicalPath.toPath().startsWith(canonicalRoot.toPath())
+        } catch (_: IOException) {
+            false
+        }
+    }
+
     private fun isWriteFileOutsideWorkdir(args: String, workDir: String): Boolean {
         try {
             val params = JSONObject(if (args.isBlank()) "{}" else args)
             val path = params.optString("path", "")
-            if (path.isEmpty() || workDir.isEmpty()) return false
-            return !path.startsWith(workDir)
+            if (path.isEmpty() || workDir.isEmpty()) return true
+            return !isPathInside(path, workDir)
         } catch (_: Exception) {
-            return false
+            return true
         }
     }
 
@@ -822,29 +995,23 @@ class AgentRuntime(private val context: Context) {
             return true
         }
 
-        val permId = "perm_${toolName}_${session.toolCallCount}"
+        val permId = "perm_${session.id}_$toolCallId"
 
         if (session.permissionRemember[toolName] == true) {
-            return session.permissionDecisions[permId] != PermOutcome.DENIED
+            return true
+        }
+
+        session.pendingPermissions[permId] = JSONObject().apply {
+            put("tool", toolName)
+            put("toolCallId", toolCallId)
         }
 
         emitFrame(session, onFrame, "permission-req", null, JSONObject().apply {
             put("id", permId)
+            put("permissionId", permId)
             put("tool", toolName)
             put("title", "请求执行: $toolName")
             put("tool_call_id", toolCallId)
-        })
-
-        sessionManager?.appendFrame(session.id, JSONObject().apply {
-            put("type", "permission-req")
-            put("data", JSONObject().apply {
-                put("id", permId)
-                put("tool", toolName)
-                put("title", "请求执行: $toolName")
-                put("tool_call_id", toolCallId)
-            })
-            put("timestamp", System.currentTimeMillis())
-            put("seq", frameSeq.get())
         })
 
         val startTime = System.currentTimeMillis()
@@ -854,12 +1021,14 @@ class AgentRuntime(private val context: Context) {
             val decision = session.permissionDecisions[permId]
             if (decision != null) {
                 session.permissionDecisions.remove(permId)
+                session.pendingPermissions.remove(permId)
                 return decision == PermOutcome.APPROVED
             }
             Thread.sleep(200)
         }
 
         session.permissionDecisions[permId] = PermOutcome.TIMEOUT
+        session.pendingPermissions.remove(permId)
         emitFrame(session, onFrame, "permission-resolved", null, JSONObject().apply {
             put("id", permId)
             put("outcome", "timeout")
@@ -963,21 +1132,37 @@ class AgentRuntime(private val context: Context) {
         return sb.toString()
     }
 
-    private fun handleTool(name: String, params: JSONObject): String {
+    private fun handleTool(
+        session: AgentSession,
+        name: String,
+        params: JSONObject,
+        onFrame: (JSONObject) -> Unit,
+        onError: (String) -> Unit
+    ): String {
         if (executor != null) return executor!!.invoke(name, params)
 
         val fs = fs
         val shell = shell
         val gui = gui
-        val alpine = alpine
+        val backend = activeBackend()
         return when (name) {
-            "read_file" -> fs?.readFile(params.optString("path", "")) ?: "文件系统不可用"
+            "read_file" -> {
+                val path = params.optString("path", "")
+                if (!isPathInside(path, session.config.workDir)) "错误: 路径超出工作目录"
+                else fs?.readFile(path) ?: "文件系统不可用"
+            }
             "write_file" -> {
-                fs?.writeFile(params.optString("path"), params.optString("content", ""))
-                "写入成功"
+                val path = params.optString("path", "")
+                if (!isPathInside(path, session.config.workDir)) "错误: 路径超出工作目录"
+                else {
+                    fs?.writeFile(path, params.optString("content", ""))
+                    "写入成功"
+                }
             }
             "list_directory" -> {
-                val dir = fs?.listDirectory(params.optString("path", "."))
+                val path = params.optString("path", session.config.workDir).ifBlank { session.config.workDir }
+                if (!isPathInside(path, session.config.workDir)) return "错误: 路径超出工作目录"
+                val dir = fs?.listDirectory(path)
                 if (dir == null) "目录不存在"
                 else dir.joinToString("\n") { e: FileEntry -> if (e.isDirectory) "${e.name}/" else e.name }
             }
@@ -985,16 +1170,17 @@ class AgentRuntime(private val context: Context) {
                 val cmd = params.optString("command", "")
                 val identity = params.optString("identity", "user").ifEmpty { "user" }
                 if (sandboxMode) {
-                    alpine?.execCommand(cmd)?.let { "${it.stdout}\n${it.stderr}".trim() } ?: "Linux 沙箱不可用"
+                    backend?.invoke(cmd)?.let { "${it.stdout}\n${it.stderr}".trim() } ?: "Linux 沙箱不可用"
                 } else if (shell != null) {
                     shell.execSync(cmd, identity).let { "${it.stdout}\n${it.stderr}".trim() }
                 } else {
-                    alpine?.execCommand(cmd)?.let { "${it.stdout}\n${it.stderr}".trim() } ?: "执行器不可用"
+                    backend?.invoke(cmd)?.let { "${it.stdout}\n${it.stderr}".trim() } ?: "执行器不可用"
                 }
             }
             "install_package" -> {
                 val pkg = params.optString("package", "")
-                alpine?.execCommand("apk add --no-cache $pkg")?.let { "${it.stdout}\n${it.stderr}".trim() }
+                val command = if (ubuntu?.isActive == true) "apt-get install -y --no-install-recommends $pkg" else "apk add --no-cache $pkg"
+                backend?.invoke(command)?.let { "${it.stdout}\n${it.stderr}".trim() }
                     ?: "Linux 环境不可用"
             }
             "screenshot" -> gui?.takeScreenshot() ?: "截图不可用"
@@ -1015,7 +1201,7 @@ class AgentRuntime(private val context: Context) {
             "set_alarm" -> "闹钟设置需要用户授权"
             "toggle_wifi" -> "WiFi 控制需要用户授权"
             "toggle_bluetooth" -> "蓝牙控制需要用户授权"
-            "spawn_agent" -> handleSpawnAgent(params)
+            "spawn_agent" -> handleSpawnAgent(session, params, onFrame, onError)
             else -> {
                 if (name.startsWith("mcp_")) {
                     handleMcpTool(name, params)
@@ -1026,7 +1212,18 @@ class AgentRuntime(private val context: Context) {
         }
     }
 
-    private fun handleSpawnAgent(params: JSONObject): String {
+    private fun activeBackend(): ((String) -> LinuxCommandResult)? = when {
+        ubuntu?.isActive == true -> ({ command -> ubuntu!!.execCommand(command) })
+        alpine != null -> ({ command -> alpine!!.execCommand(command) })
+        else -> null
+    }
+
+    private fun handleSpawnAgent(
+        session: AgentSession,
+        params: JSONObject,
+        onFrame: (JSONObject) -> Unit,
+        onError: (String) -> Unit
+    ): String {
         val subagentMgr = subagentManager
         if (subagentMgr == null) return "子代理管理器未初始化"
         if (!subagentMgr.canSpawn()) return "子代理并行数已达上限"
@@ -1042,26 +1239,38 @@ class AgentRuntime(private val context: Context) {
             } ?: emptyList(),
             model = params.optString("model", null),
             baseUrl = params.optString("base_url", null),
-            apiKey = params.optString("api_key", null)
+            apiKey = params.optString("api_key", null),
+            interfaceType = session.config.interfaceType
         )
 
-        val parentId = ""
-        val result = subagentMgr.spawn(config, parentId, { _ -> }, { _ -> })
+        val invalidPath = config.writePaths.any { !isPathInside(it, session.config.workDir) }
+        if (invalidPath) return "错误: 子代理写入路径超出工作目录"
+        val inherited = config.copy(
+            model = config.model ?: session.config.model,
+            baseUrl = config.baseUrl ?: session.config.baseUrl,
+            apiKey = config.apiKey ?: session.config.apiKey,
+            interfaceType = config.interfaceType ?: session.config.interfaceType
+        )
+        val result = subagentMgr.spawn(inherited, session.id, onFrame, onError)
         return if (result != null) "子代理已启动: $result" else "子代理启动失败"
     }
 
     private fun handleMcpTool(fullName: String, params: JSONObject): String {
         val mcp = mcpClient ?: return "MCP 客户端未初始化"
-        val parts = fullName.removePrefix("mcp_").split("_", limit = 2)
-        if (parts.size < 2) return "MCP 工具名格式错误: $fullName"
-        return mcp.callTool(parts[0], parts[1], params)
+        return mcp.callRegisteredTool(fullName, params)
     }
 
-    private fun executeTool(name: String, args: String): String {
+    private fun executeTool(
+        session: AgentSession,
+        name: String,
+        args: String,
+        onFrame: (JSONObject) -> Unit,
+        onError: (String) -> Unit
+    ): String {
         return try {
             val params = JSONObject(if (args.isBlank()) "{}" else args)
             if (executor != null) executor!!.invoke(name, params)
-            else handleTool(name, params)
+            else handleTool(session, name, params, onFrame, onError)
         } catch (e: Exception) {
             "错误: ${e.message}"
         }
@@ -1072,7 +1281,11 @@ class AgentRuntime(private val context: Context) {
         val frame = JSONObject().apply {
             put("type", type)
             if (kind != null) put("kind", kind)
-            if (data != null) put("data", data)
+            if (data != null) {
+                put("data", if (kind == "acp_event" && data.has("sessionUpdate")) {
+                    JSONObject().put("update", data)
+                } else data)
+            }
             put("timestamp", System.currentTimeMillis())
             put("seq", seq)
         }

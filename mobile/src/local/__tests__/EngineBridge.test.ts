@@ -8,13 +8,19 @@ const mockPrivileged = {
   cancelAgent: jest.fn(),
   pauseAgent: jest.fn(),
   sendAgentInput: jest.fn(),
+  approvePermission: jest.fn(),
+  denyPermission: jest.fn(),
 };
+const nativeListeners: Record<string, (event: any) => void> = {};
 
 jest.doMock('react-native', () => ({
   Platform: { OS: 'android' },
   NativeModules: { PrivilegedExecution: mockPrivileged },
   DeviceEventEmitter: {
-    addListener: jest.fn(() => ({ remove: jest.fn() })),
+    addListener: jest.fn((event: string, listener: (value: any) => void) => {
+      nativeListeners[event] = listener;
+      return { remove: jest.fn() };
+    }),
   },
 }));
 
@@ -97,6 +103,33 @@ describe('EngineBridge 引擎状态机（自研 Agent）', () => {
     await bridge.startEngine(config as never);
     await bridge.sendInput('继续');
     expect(mockPrivileged.sendAgentInput).toHaveBeenCalledWith('继续');
+  });
+
+  test('权限审批全链透传相同 permissionId', async () => {
+    mockPrivileged.startAgent.mockResolvedValue('agent_1');
+    mockPrivileged.approvePermission.mockResolvedValue(true);
+    mockPrivileged.denyPermission.mockResolvedValue(true);
+    await bridge.startEngine(config as never);
+    await bridge.approvePermission('perm_agent_1_call_7', true);
+    await bridge.denyPermission('perm_agent_1_call_8');
+    expect(mockPrivileged.approvePermission).toHaveBeenCalledWith('perm_agent_1_call_7', true);
+    expect(mockPrivileged.denyPermission).toHaveBeenCalledWith('perm_agent_1_call_8');
+  });
+
+  test('Frame 保留 data.update.sessionUpdate 协议对象', () => {
+    const frames: any[] = [];
+    bridge.onFrame((frame: any) => frames.push(frame));
+    nativeListeners.engineFrame({
+      type: 'task-running', kind: 'acp_event', timestamp: 1, seq: 2,
+      data: { update: { sessionUpdate: 'tool_call', toolCallId: 'call_1' } },
+    });
+    expect(frames[0].data.update).toEqual({ sessionUpdate: 'tool_call', toolCallId: 'call_1' });
+  });
+
+  test('engineStatus 对象同时更新状态与详情 DTO', () => {
+    nativeListeners.engineStatus({ status: 'crashed', phase: 'subagent_error', detail: 'boom' });
+    expect(bridge.getStatus()).toBe('crashed');
+    expect(bridge.getStatusDetail()).toMatchObject({ phase: 'subagent_error', detail: 'boom' });
   });
 
   test('onStatusChange 监听器收到 starting -> ready 状态', async () => {

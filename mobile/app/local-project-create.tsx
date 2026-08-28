@@ -2,7 +2,7 @@
  * 新建本地项目 —— 特权模式下创建本地工作区目录（可选初始化 Git 或从远程克隆）。
  * 需要 Root 提权来创建任意路径目录；核心操作走特权 API。
  */
-import { useNavigation, useRouter } from 'expo-router';
+import { useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
 import React, { useCallback, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
@@ -11,15 +11,17 @@ import { Icons } from '@/components/Icons';
 import { Card, GlassNav, PrimaryButton } from '@/components/ui';
 import { createLocalProject } from '@/local/localProjects';
 import { privilegedApi } from '@/local/privilegedApi';
-import { useTheme, type Theme } from '@/theme';
+import { useTheme } from '@/theme';
 
 const DEFAULT_PATH = '/sdcard/MonkeyCode';
+const shellQuote = (value: string) => `'${value.replace(/'/g, `'"'"'`)}'`;
 
 export default function LocalProjectCreateScreen() {
   const t = useTheme();
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const navigation = useNavigation();
+  const params = useLocalSearchParams<{ mode?: string }>();
 
   const [name, setName] = useState('');
   const [path, setPath] = useState(DEFAULT_PATH);
@@ -37,6 +39,7 @@ export default function LocalProjectCreateScreen() {
     const trimmedName = name.trim();
     if (!trimmedName) { Alert.alert('提示', '请输入项目名称'); return; }
     if (!path.trim()) { Alert.alert('提示', '请输入项目路径'); return; }
+    if (params.mode === 'clone' && !remoteUrl.trim()) { Alert.alert('提示', '请输入 Git 仓库地址'); return; }
 
     setSaving(true);
     try {
@@ -50,13 +53,13 @@ export default function LocalProjectCreateScreen() {
       if (remoteUrl.trim()) {
         // 克隆远程仓库（需要 git，通常通过 Alpine linux 环境；此处尝试 sh git，失败仅提示）
         try {
-          await privilegedApi.execAlpine(`git clone ${remoteUrl.trim()} '${path.trim()}'`);
+          await privilegedApi.execAlpine(`git clone -- ${shellQuote(remoteUrl.trim())} ${shellQuote(path.trim())}`);
         } catch (e: any) {
           Alert.alert('克隆失败', `${e.message || '无法克隆远程仓库'}（项目记录仍将创建）`);
         }
       } else if (gitInit) {
         try {
-          await privilegedApi.execAlpine(`git init '${path.trim()}'`);
+          await privilegedApi.execAlpine(`git init -- ${shellQuote(path.trim())}`);
         } catch { /* 忽略 */ }
       }
 
@@ -95,7 +98,7 @@ export default function LocalProjectCreateScreen() {
               style={[styles.input, { backgroundColor: t.bg3, color: t.tx, fontFamily: 'monospace' }]}
             />
 
-            <Text style={[styles.label, { color: t.tx3, marginTop: 16 }]}>远程仓库地址（可选，克隆用）</Text>
+            <Text style={[styles.label, { color: t.tx3, marginTop: 16 }]}>{params.mode === 'clone' ? 'Git 仓库地址' : '远程仓库地址（可选，克隆用）'}</Text>
             <TextInput
               placeholder="https://github.com/owner/repo.git"
               placeholderTextColor={t.tx3}
@@ -106,7 +109,7 @@ export default function LocalProjectCreateScreen() {
               style={[styles.input, { backgroundColor: t.bg3, color: t.tx, fontFamily: 'monospace' }]}
             />
 
-            {!remoteUrl.trim() && (
+            {params.mode !== 'clone' && !remoteUrl.trim() && (
               <Pressable onPress={() => setGitInit(!gitInit)} style={{ flexDirection: 'row', alignItems: 'center', gap: 9, marginTop: 18 }}>
                 <Pressable onPress={() => setGitInit(!gitInit)} style={{ width: 20, height: 20, borderRadius: 6, borderWidth: 1.5, borderColor: gitInit ? t.ac : t.tx3, alignItems: 'center', justifyContent: 'center', backgroundColor: gitInit ? t.ac : 'transparent' }}>
                   {gitInit ? <Icons.check size={13} color={t.acInk} sw={2.8} /> : null}

@@ -4,8 +4,12 @@ import android.content.Context
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
+import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 data class LinuxCommandResult(
     val stdout: String,
@@ -23,6 +27,7 @@ data class LinuxCommandResult(
  *  - 沙箱模式（无 root）也能跑完整 Linux 工具链。
  */
 class AlpineEnvironment(private val context: Context) {
+    @Volatile var isActive: Boolean = true
 
     companion object {
         const val SANDBOX_TYPE = "alpine"
@@ -155,10 +160,33 @@ class AlpineEnvironment(private val context: Context) {
         } catch (e: IOException) {
             return LinuxCommandResult("", "启动进程失败: ${e.message}", -1)
         }
-        val stdout = process.inputStream.bufferedReader().readText()
-        val stderr = process.errorStream.bufferedReader().readText()
-        val exit = try { process.waitFor() } catch (e: InterruptedException) { -1 }
-        return LinuxCommandResult(stdout, stderr, exit)
+        val pool = Executors.newFixedThreadPool(2)
+        val stdout = pool.submit<String> { readBounded(process.inputStream) }
+        val stderr = pool.submit<String> { readBounded(process.errorStream) }
+        val exit = try { process.waitFor() } catch (_: InterruptedException) {
+            process.destroy()
+            Thread.currentThread().interrupt()
+            -1
+        }
+        pool.shutdown()
+        pool.awaitTermination(5, TimeUnit.SECONDS)
+        return LinuxCommandResult(stdout.get(), stderr.get(), exit)
+    }
+
+    private fun readBounded(input: InputStream, limit: Int = 4 * 1024 * 1024): String = input.use {
+        val output = ByteArrayOutputStream(minOf(limit, 64 * 1024))
+        val buffer = ByteArray(8192)
+        var total = 0
+        var truncated = false
+        while (true) {
+            val count = it.read(buffer)
+            if (count < 0) break
+            val retained = minOf(count, limit - total)
+            if (retained > 0) output.write(buffer, 0, retained)
+            total += count
+            if (total > limit) truncated = true
+        }
+        output.toString(Charsets.UTF_8.name()) + if (truncated) "\n[output truncated]" else ""
     }
 
     private fun extractAsset(asset: String, dest: File): Boolean {

@@ -1,17 +1,19 @@
-name: Build Mobile APK
+name: Build Mobile LSPosed API 102
 
 on:
   push:
     branches: [main]
     paths:
-      - 'mobile/**'
-      - '!mobile/lsposed/**'
-      - 'scripts/prepare_android_sandbox.sh'
-      - '.github/workflows/mobile-build.yml'
+      - 'mobile/lsposed/**'
+      - '.github/workflows/mobile-lsposed.yml'
+  pull_request:
+    paths:
+      - 'mobile/lsposed/**'
+      - '.github/workflows/mobile-lsposed.yml'
   workflow_dispatch:
 
 concurrency:
-  group: mobile-build-${{ github.sha }}
+  group: mobile-lsposed-${{ github.sha }}
   cancel-in-progress: false
 
 permissions:
@@ -33,7 +35,7 @@ jobs:
             const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
               owner: context.repo.owner,
               repo: context.repo.repo,
-              workflow_id: 'mobile-build.yml',
+              workflow_id: 'mobile-lsposed.yml',
               head_sha: context.sha,
               per_page: 100,
             });
@@ -45,25 +47,14 @@ jobs:
     needs: deduplicate
     if: needs.deduplicate.outputs.should-run == 'true'
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: mobile
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: mobile/package-lock.json
 
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
@@ -71,31 +62,27 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Compile LSPosed API 102 module
+        working-directory: mobile/lsposed
+        run: ./gradlew compileReleaseKotlin --build-cache --no-daemon
 
-      - name: Prepare Linux sandbox assets
-        run: bash ../scripts/prepare_android_sandbox.sh
-
-      - name: Prebuild Android
-        run: npx expo prebuild --platform android --clean --no-install
-
-      - name: Kotlin compile gate
-        working-directory: mobile/android
-        run: ./gradlew :app:compileReleaseKotlin --build-cache --no-daemon
-
-      - name: Assemble release APK
-        working-directory: mobile/android
-        run: ./gradlew :app:assembleRelease --build-cache --no-daemon
+      - name: Assemble LSPosed API 102 module
+        working-directory: mobile/lsposed
+        run: ./gradlew assembleRelease --build-cache --no-daemon
 
       - name: Assign unique APK name
-        run: cp android/app/build/outputs/apk/release/app-release.apk "MonkeyCode-mobile-${GITHUB_SHA}.apk"
+        shell: bash
+        run: |
+          shopt -s nullglob
+          apks=(mobile/lsposed/build/outputs/apk/release/*.apk)
+          test "${#apks[@]}" -eq 1
+          cp "${apks[0]}" "mobile/lsposed/MonkeyCode-lsposed-api102-${GITHUB_SHA}.apk"
 
-      - name: Upload APK
+      - name: Upload LSPosed APK
         uses: actions/upload-artifact@v4
         with:
-          name: monkeycode-mobile-${{ github.sha }}
-          path: mobile/MonkeyCode-mobile-${{ github.sha }}.apk
+          name: monkeycode-lsposed-api102-${{ github.sha }}
+          path: mobile/lsposed/MonkeyCode-lsposed-api102-${{ github.sha }}.apk
           if-no-files-found: error
 
   release:
@@ -103,18 +90,18 @@ jobs:
     if: github.ref == 'refs/heads/main' && success()
     runs-on: ubuntu-latest
     steps:
-      - name: Download APK
+      - name: Download LSPosed APK
         uses: actions/download-artifact@v4
         with:
-          name: monkeycode-mobile-${{ github.sha }}
+          name: monkeycode-lsposed-api102-${{ github.sha }}
           path: artifacts
 
-      - name: Create release
+      - name: Create LSPosed release
         uses: softprops/action-gh-release@v2
         with:
-          name: Mobile Build ${{ github.run_number }}
-          tag_name: mobile-build-${{ github.run_number }}
-          files: artifacts/MonkeyCode-mobile-${{ github.sha }}.apk
+          name: LSPosed API 102 Build ${{ github.run_number }}
+          tag_name: mobile-lsposed-${{ github.run_number }}
+          files: artifacts/MonkeyCode-lsposed-api102-${{ github.sha }}.apk
           fail_on_unmatched_files: true
           draft: false
           prerelease: true

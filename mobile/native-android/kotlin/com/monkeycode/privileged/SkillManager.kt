@@ -148,8 +148,8 @@ class SkillManager(private val context: Context) {
         }
     }
 
-    fun generateSkillSystemPrompt(): String {
-        val enabled = getEnabledSkills()
+    fun generateSkillSystemPrompt(requested: List<String> = emptyList()): String {
+        val enabled = if (requested.isEmpty()) getEnabledSkills() else requested.mapNotNull(::getSkill)
         if (enabled.isEmpty()) return ""
 
         val sb = StringBuilder()

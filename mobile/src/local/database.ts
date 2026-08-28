@@ -118,6 +118,14 @@ async function migrate(database: SQLite.SQLiteDatabase): Promise<void> {
     `);
     await setVersion(database, 2);
   }
+
+  if (version < 3) {
+    await database.execAsync(`
+      CREATE INDEX IF NOT EXISTS idx_local_sessions_updated_at ON local_sessions(updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_local_tasks_updated_at ON local_tasks(updated_at DESC);
+    `);
+    await setVersion(database, 3);
+  }
 }
 
 async function getVersion(database: SQLite.SQLiteDatabase): Promise<number> {

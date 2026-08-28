@@ -13,10 +13,8 @@ export interface AgentModelOption {
   contextWindow: number;
   maxOutput: number;
   thinking: { enabled: boolean; effort: string };
+  transport: 'direct';
 }
-
-const DEFAULT_BASE_URL = 'https://monkeycode-ai.com';
-const DEFAULT_API_KEY = ''; // 云端模型经服务端代理，本地引擎需要用户自行提供 key 或走私有模型
 
 /** 把移动端 Model 适配为本地 Agent 可用的 LLM 后端配置。 */
 export function toAgentModel(m: Model): AgentModelOption | null {
@@ -35,28 +33,12 @@ export function toAgentModel(m: Model): AgentModelOption | null {
       contextWindow: m.context_limit ?? 128000,
       maxOutput: m.output_limit ?? 32768,
       thinking: { enabled: !!m.thinking_enabled, effort: 'low' },
+      transport: 'direct',
     };
   }
 
-  // 云端会员模型：模型 id 可直接使用，Base URL 用平台网关（本地 agent 调云端模型无需自备 key）
-  // provider 可能是 monkeycode / 内置，统一走平台兼容端点
-  return {
-    key: `cloud-${m.id || modelId}`,
-    label: m.remark?.trim() || modelId,
-    model: strippedModelId(modelId),
-    baseUrl: DEFAULT_BASE_URL,
-    apiKey: DEFAULT_API_KEY, // 云端会员模型由平台鉴权，本地引擎经网关代理
-    interfaceType: 'auto',
-    contextWindow: m.context_limit ?? 200000,
-    maxOutput: m.output_limit ?? 32768,
-    thinking: { enabled: !!m.thinking_enabled, effort: 'low' },
-  };
-}
-
-/** 去除 monkeycode-basic/pro/ultra 前缀，取真正的模型 id（如 /claude-xxx）。 */
-function strippedModelId(modelId: string): string {
-  const m = modelId.replace(/^monkeycode-(basic|pro|ultra)/i, '');
-  return m.replace(/^\/+/, '');
+  // 共享模型缺少可供原生 runtime 使用的 gateway 凭据，避免把它伪装成空 key 直连后端。
+  return null;
 }
 
 /** 加载可用的本地 Agent 模型列表。 */
@@ -70,11 +52,11 @@ export async function loadAgentModels(): Promise<AgentModelOption[]> {
 
 /** 从选中的模型生成本地引擎配置。 */
 export function buildEngineConfig(opt: AgentModelOption, workDir: string, initialInput: string, systemPrompt?: string): EngineConfig {
-  const isAuto = opt.interfaceType === 'auto';
+  if (opt.interfaceType === 'auto') throw new Error('本地 Agent 需要明确的模型接口类型');
   return {
     workDir,
     modelConfig: {
-      type: isAuto ? 'openai_chat' : opt.interfaceType,
+      type: opt.interfaceType,
       model: opt.model,
       baseUrl: opt.baseUrl,
       apiKey: opt.apiKey,
@@ -82,13 +64,12 @@ export function buildEngineConfig(opt: AgentModelOption, workDir: string, initia
       maxOutput: opt.maxOutput,
       supportsImages: true,
       thinking: opt.thinking,
-      // 始终携带协议类型：auto（云端网关）走 openai_chat 兼容端点
-      interfaceType: isAuto ? 'openai_chat' : opt.interfaceType,
+      interfaceType: opt.interfaceType,
     },
     systemPrompt: systemPrompt || defaultSystemPrompt(workDir),
     initialInput,
     skills: [],
-  } as unknown as EngineConfig;
+  };
 }
 
 /** 默认本地 Agent 系统提示：声明可用工具与工作目录（对齐 OpenMinis/shiyi 的 agent 提示风格）。 */

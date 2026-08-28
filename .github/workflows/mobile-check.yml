@@ -1,4 +1,4 @@
-name: Build Mobile APK
+name: Check Mobile
 
 on:
   push:
@@ -6,16 +6,20 @@ on:
     paths:
       - 'mobile/**'
       - '!mobile/lsposed/**'
-      - 'scripts/prepare_android_sandbox.sh'
-      - '.github/workflows/mobile-build.yml'
+      - '.github/workflows/mobile-check.yml'
+  pull_request:
+    paths:
+      - 'mobile/**'
+      - '!mobile/lsposed/**'
+      - '.github/workflows/mobile-check.yml'
   workflow_dispatch:
 
 concurrency:
-  group: mobile-build-${{ github.sha }}
+  group: mobile-check-${{ github.sha }}
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
   actions: read
 
 jobs:
@@ -33,7 +37,7 @@ jobs:
             const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
               owner: context.repo.owner,
               repo: context.repo.repo,
-              workflow_id: 'mobile-build.yml',
+              workflow_id: 'mobile-check.yml',
               head_sha: context.sha,
               per_page: 100,
             });
@@ -41,7 +45,7 @@ jobs:
               run.id !== context.runId && run.conclusion === 'success'
             );
 
-  build:
+  check:
     needs: deduplicate
     if: needs.deduplicate.outputs.should-run == 'true'
     runs-on: ubuntu-latest
@@ -74,49 +78,26 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Prepare Linux sandbox assets
-        run: bash ../scripts/prepare_android_sandbox.sh
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Run Jest
+        run: npm test -- --runInBand
+
+      - name: Run lint
+        run: npm run lint
+
+      - name: Cache Expo Android prebuild
+        id: expo-prebuild-cache
+        uses: actions/cache@v4
+        with:
+          path: mobile/android
+          key: expo-android-${{ runner.os }}-${{ hashFiles('mobile/package-lock.json', 'mobile/app.json', 'mobile/plugins/**', 'mobile/native-android/**') }}
 
       - name: Prebuild Android
+        if: steps.expo-prebuild-cache.outputs.cache-hit != 'true'
         run: npx expo prebuild --platform android --clean --no-install
 
       - name: Kotlin compile gate
         working-directory: mobile/android
         run: ./gradlew :app:compileReleaseKotlin --build-cache --no-daemon
-
-      - name: Assemble release APK
-        working-directory: mobile/android
-        run: ./gradlew :app:assembleRelease --build-cache --no-daemon
-
-      - name: Assign unique APK name
-        run: cp android/app/build/outputs/apk/release/app-release.apk "MonkeyCode-mobile-${GITHUB_SHA}.apk"
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: monkeycode-mobile-${{ github.sha }}
-          path: mobile/MonkeyCode-mobile-${{ github.sha }}.apk
-          if-no-files-found: error
-
-  release:
-    needs: build
-    if: github.ref == 'refs/heads/main' && success()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download APK
-        uses: actions/download-artifact@v4
-        with:
-          name: monkeycode-mobile-${{ github.sha }}
-          path: artifacts
-
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: Mobile Build ${{ github.run_number }}
-          tag_name: mobile-build-${{ github.run_number }}
-          files: artifacts/MonkeyCode-mobile-${{ github.sha }}.apk
-          fail_on_unmatched_files: true
-          draft: false
-          prerelease: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

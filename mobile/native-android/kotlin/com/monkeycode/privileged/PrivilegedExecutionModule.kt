@@ -17,17 +17,30 @@ class PrivilegedExecutionModule(reactContext: ReactApplicationContext) :
     private val alpineEnvironment = AlpineEnvironment(reactContext)
     private val ubuntuEnvironment = UbuntuEnvironment(reactContext)
 
-    private var sandboxType: String = "alpine"
+    private val preferences = reactContext.getSharedPreferences("privileged_execution", 0)
+    private var sandboxType: String = preferences.getString("sandbox_type", AlpineEnvironment.SANDBOX_TYPE)
+        ?: AlpineEnvironment.SANDBOX_TYPE
 
-    private val browserService: BrowserService by lazy { BrowserService(reactContext.applicationContext) }
-    private val browserMcpServer: BrowserMcpServer by lazy { BrowserMcpServer(browserService) }
+    private val browserServiceDelegate = lazy { BrowserService(reactContext.applicationContext) }
+    private val browserService: BrowserService by browserServiceDelegate
+    private val browserMcpServerDelegate = lazy { BrowserMcpServer(browserService) }
+    private val browserMcpServer: BrowserMcpServer by browserMcpServerDelegate
 
     private val sessionDataCallbacks = ConcurrentHashMap<String, (String) -> Unit>()
     private val sessionExitCallbacks = ConcurrentHashMap<String, (Int) -> Unit>()
 
     override fun getName(): String = "PrivilegedExecution"
 
+    override fun invalidate() {
+        if (browserMcpServerDelegate.isInitialized()) browserMcpServer.stop()
+        if (browserServiceDelegate.isInitialized()) browserService.destroy()
+        sessionDataCallbacks.clear()
+        sessionExitCallbacks.clear()
+        super.invalidate()
+    }
+
     init {
+        applyActiveBackend(sandboxType)
         // 接线 RootShellManager 会话输出/退出回调 → 全局事件（配合 JS 端 DeviceEventEmitter）
         rootShellManager.onSessionData = { sessionId: String, data: String ->
             sessionDataCallbacks[sessionId]?.invoke(data)
@@ -43,6 +56,17 @@ class PrivilegedExecutionModule(reactContext: ReactApplicationContext) :
                 putInt("exitCode", exitCode)
             })
         }
+    }
+
+    private fun applyActiveBackend(type: String) {
+        sandboxType = type
+        alpineEnvironment.isActive = type == AlpineEnvironment.SANDBOX_TYPE
+        ubuntuEnvironment.isActive = type == UbuntuEnvironment.SANDBOX_TYPE
+    }
+
+    private fun execActiveBackend(command: String): LinuxCommandResult = when (sandboxType) {
+        UbuntuEnvironment.SANDBOX_TYPE -> ubuntuEnvironment.execCommand(command)
+        else -> alpineEnvironment.execCommand(command)
     }
 
     // ==================== Permission Detection ====================
@@ -498,13 +522,28 @@ class PrivilegedExecutionModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
+    fun execSandboxCommand(command: String, promise: Promise) {
+        try {
+            val result = execActiveBackend(command)
+            promise.resolve(Arguments.createMap().apply {
+                putString("stdout", result.stdout)
+                putString("stderr", result.stderr)
+                putInt("exitCode", result.exitCode)
+            })
+        } catch (e: Exception) {
+            promise.reject("SANDBOX_EXEC_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
     fun setSandboxType(type: String, promise: Promise) {
         try {
             if (type != "alpine" && type != "ubuntu") {
                 promise.reject("SANDBOX_ERROR", "无效的沙箱类型: $type，仅支持 alpine 或 ubuntu")
                 return
             }
-            sandboxType = type
+            applyActiveBackend(type)
+            preferences.edit().putString("sandbox_type", type).apply()
             promise.resolve(true)
         } catch (e: Exception) {
             promise.reject("SANDBOX_ERROR", e.message)
@@ -532,6 +571,10 @@ class PrivilegedExecutionModule(reactContext: ReactApplicationContext) :
             this.alpine = alpineEnvironment
             this.ubuntu = ubuntuEnvironment
             this.sandboxMode = !isRootAvailable()
+            this.sessionManager = SessionManager(reactContext)
+            this.skillManager = SkillManager(reactContext)
+            this.mcpClient = McpClient(reactContext)
+            this.subagentManager = SubagentManager(this)
         }
     }
 
@@ -559,11 +602,13 @@ class PrivilegedExecutionModule(reactContext: ReactApplicationContext) :
                     .ifBlank { cfg.optString("interfaceType") }.ifBlank { "openai_chat" },
                 systemPrompt = cfg.optString("systemPrompt", ""),
                 initialInput = cfg.optString("initialInput", ""),
-                skills = emptyList(),
+                skills = cfg.optJSONArray("skills")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList(),
                 tools = cfg.optJSONArray("tools")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList(),
                 maxTurns = cfg.optInt("maxTurns", 64),
                 maxToolCalls = cfg.optInt("maxToolCalls", 256),
-                workDir = cfg.optString("workDir", "")
+                workDir = cfg.optString("workDir", ""),
+                streamEnabled = cfg.optBoolean("streamEnabled", true),
+                compactThreshold = cfg.optDouble("compactThreshold", 0.8)
             )
 
             if (model.optString("baseUrl").isBlank() || model.optString("apiKey").isBlank()) {
@@ -574,17 +619,12 @@ class PrivilegedExecutionModule(reactContext: ReactApplicationContext) :
             val sid = agentRuntime.startSession(
                 agentConfig,
                 onFrame = { frame ->
-                    sendEvent("engineFrame", Arguments.createMap().apply {
-                        putString("type", frame.optString("type", "task-running"))
-                        putString("kind", frame.optString("kind"))
-                        putString("data", frame.optJSONObject("data")?.toString() ?: "{}")
-                        putDouble("timestamp", System.currentTimeMillis().toDouble())
-                        putInt("seq", frame.optInt("seq", 0))
-                    })
+                    sendEvent("engineFrame", jsonObjectToMap(frame))
                 },
                 onError = { msg ->
                     sendEvent("engineStatus", Arguments.createMap().apply {
                         putString("status", "crashed")
+                        putString("phase", "crashed")
                         putString("message", msg)
                     })
                 }
@@ -594,6 +634,104 @@ class PrivilegedExecutionModule(reactContext: ReactApplicationContext) :
         } catch (e: Exception) {
             promise.reject("AGENT_ERROR", e.message)
         }
+    }
+
+    @ReactMethod
+    fun approvePermission(permissionId: String, remember: Boolean, promise: Promise) {
+        val sid = agentSessionId
+        if (sid == null) promise.reject("AGENT_PERMISSION_ERROR", "Agent 未启动")
+        else {
+            agentRuntime.approvePermission(sid, permissionId, remember)
+            promise.resolve(true)
+        }
+    }
+
+    @ReactMethod
+    fun denyPermission(permissionId: String, promise: Promise) {
+        val sid = agentSessionId
+        if (sid == null) promise.reject("AGENT_PERMISSION_ERROR", "Agent 未启动")
+        else {
+            agentRuntime.denyPermission(sid, permissionId)
+            promise.resolve(true)
+        }
+    }
+
+    @ReactMethod
+    fun spawnAgent(configJson: String, parentSessionId: String, promise: Promise) {
+        try {
+            val json = JSONObject(configJson)
+            val config = SubagentManager.SpawnConfig(
+                type = SubagentManager.SubagentType.fromString(json.optString("type")),
+                name = json.optString("name", "subagent"),
+                description = json.optString("description", ""),
+                systemPrompt = json.optString("systemPrompt", ""),
+                task = json.getString("task"),
+                maxTurns = json.optInt("maxTurns", 16),
+                writePaths = json.optJSONArray("writePaths")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList(),
+                model = json.optString("model").ifBlank { null },
+                baseUrl = json.optString("baseUrl").ifBlank { null },
+                apiKey = json.optString("apiKey").ifBlank { null },
+                interfaceType = json.optString("interfaceType").ifBlank { null }
+            )
+            val id = agentRuntime.spawnAgent(config, parentSessionId, { frame ->
+                sendEvent("engineFrame", jsonObjectToMap(frame))
+            }, { message ->
+                sendEvent("engineStatus", Arguments.createMap().apply {
+                    putString("status", "crashed")
+                    putString("phase", "subagent_error")
+                    putString("message", message)
+                })
+            })
+            promise.resolve(id)
+        } catch (e: Exception) {
+            promise.reject("SUBAGENT_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
+    fun cancelSubagent(childId: String, promise: Promise) {
+        agentRuntime.subagentManager?.cancelSubagent(childId)
+        promise.resolve(true)
+    }
+
+    @ReactMethod
+    fun listSessions(promise: Promise) {
+        val result = Arguments.createArray()
+        agentRuntime.sessionManager?.listSessions()?.forEach { meta ->
+            result.pushMap(Arguments.createMap().apply {
+                putString("id", meta.id); putString("title", meta.title); putString("summary", meta.summary)
+                putString("status", meta.status.asString()); putString("engineId", meta.engineId)
+                putDouble("createdAt", meta.createdAt.toDouble()); putDouble("updatedAt", meta.updatedAt.toDouble())
+            })
+        }
+        promise.resolve(result)
+    }
+
+    @ReactMethod
+    fun getSessionHistory(sessionId: String, cursor: String, limit: Int, promise: Promise) {
+        val offset = cursor.toLongOrNull() ?: 0L
+        val requested = limit.coerceAtLeast(1)
+        val frames = agentRuntime.sessionManager?.sessionHistory(sessionId, offset, requested + 1) ?: emptyList()
+        val page = frames.take(requested)
+        promise.resolve(Arguments.createMap().apply {
+            putArray("frames", jsonObjectsToArray(page))
+            putString("cursor", (offset + page.size).toString())
+            putBoolean("has_more", frames.size > requested)
+        })
+    }
+
+    @ReactMethod
+    fun openSession(sessionId: String, promise: Promise) = getSessionHistory(sessionId, "0", 50, promise)
+
+    @ReactMethod
+    fun getSessionFrame(sessionId: String, seq: Double, promise: Promise) {
+        promise.resolve(agentRuntime.sessionManager?.sessionFrame(sessionId, seq.toLong())?.let(::jsonObjectToMap))
+    }
+
+    @ReactMethod
+    fun deleteSession(sessionId: String, promise: Promise) {
+        agentRuntime.sessionManager?.sessionDestroy(sessionId)
+        promise.resolve(true)
     }
 
     @ReactMethod
@@ -780,6 +918,40 @@ class PrivilegedExecutionModule(reactContext: ReactApplicationContext) :
             }
         } catch (e: Throwable) {
             android.util.Log.w("MonkeyCode", "queue emit $eventName failed", e)
+        }
+    }
+
+    private fun jsonObjectsToArray(values: List<JSONObject>): WritableArray = Arguments.createArray().apply {
+        values.forEach { pushMap(jsonObjectToMap(it)) }
+    }
+
+    private fun jsonObjectToMap(json: JSONObject): WritableMap = Arguments.createMap().apply {
+        json.keys().forEach { key ->
+            when (val value = json.opt(key)) {
+                null, JSONObject.NULL -> putNull(key)
+                is String -> putString(key, value)
+                is Boolean -> putBoolean(key, value)
+                is Int -> putInt(key, value)
+                is Number -> putDouble(key, value.toDouble())
+                is JSONObject -> putMap(key, jsonObjectToMap(value))
+                is org.json.JSONArray -> putArray(key, jsonArrayToArray(value))
+                else -> putString(key, value.toString())
+            }
+        }
+    }
+
+    private fun jsonArrayToArray(json: org.json.JSONArray): WritableArray = Arguments.createArray().apply {
+        for (i in 0 until json.length()) {
+            when (val value = json.opt(i)) {
+                null, JSONObject.NULL -> pushNull()
+                is String -> pushString(value)
+                is Boolean -> pushBoolean(value)
+                is Int -> pushInt(value)
+                is Number -> pushDouble(value.toDouble())
+                is JSONObject -> pushMap(jsonObjectToMap(value))
+                is org.json.JSONArray -> pushArray(jsonArrayToArray(value))
+                else -> pushString(value.toString())
+            }
         }
     }
 

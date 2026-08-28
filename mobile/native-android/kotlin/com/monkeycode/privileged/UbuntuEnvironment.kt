@@ -1,11 +1,15 @@
 package com.monkeycode.privileged
 
 import android.content.Context
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * Ubuntu 24.04 ARM64 用户空间沙箱（PRoot）。
@@ -18,6 +22,7 @@ import java.net.URL
  *  - 沙箱模式（无 root）也能跑完整 Linux 工具链。
  */
 class UbuntuEnvironment(private val context: Context) {
+    @Volatile var isActive: Boolean = false
 
     companion object {
         const val SANDBOX_TYPE = "ubuntu"
@@ -25,7 +30,7 @@ class UbuntuEnvironment(private val context: Context) {
         private const val ASSET_PROOT = "alpine/proot"
         private const val ASSET_ROOTFS = "ubuntu/rootfs.tar.gz"
 
-        private const val FALLBACK_ROOTFS_URL = "http://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04-base-arm64.tar.gz"
+        private const val FALLBACK_ROOTFS_URL = "https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04-base-arm64.tar.gz"
         private const val FALLBACK_PROOT_URL = "https://github.com/termux/proot/releases/download/v0.8.3/proot-v0.8.3-android-aarch64.tar.gz"
 
         val TOOL_PACKAGES = listOf(
@@ -152,10 +157,37 @@ class UbuntuEnvironment(private val context: Context) {
         } catch (e: IOException) {
             return LinuxCommandResult("", "启动进程失败: ${e.message}", -1)
         }
-        val stdout = process.inputStream.bufferedReader().readText()
-        val stderr = process.errorStream.bufferedReader().readText()
-        val exit = try { process.waitFor() } catch (e: InterruptedException) { -1 }
-        return LinuxCommandResult(stdout, stderr, exit)
+        return collectProcess(process)
+    }
+
+    private fun collectProcess(process: Process): LinuxCommandResult {
+        val pool = Executors.newFixedThreadPool(2)
+        val stdout = pool.submit<String> { readBounded(process.inputStream) }
+        val stderr = pool.submit<String> { readBounded(process.errorStream) }
+        val exit = try { process.waitFor() } catch (_: InterruptedException) {
+            process.destroy()
+            Thread.currentThread().interrupt()
+            -1
+        }
+        pool.shutdown()
+        pool.awaitTermination(5, TimeUnit.SECONDS)
+        return LinuxCommandResult(stdout.get(), stderr.get(), exit)
+    }
+
+    private fun readBounded(input: InputStream, limit: Int = 4 * 1024 * 1024): String = input.use {
+        val output = ByteArrayOutputStream(minOf(limit, 64 * 1024))
+        val buffer = ByteArray(8192)
+        var total = 0
+        var truncated = false
+        while (true) {
+            val count = it.read(buffer)
+            if (count < 0) break
+            val retained = minOf(count, limit - total)
+            if (retained > 0) output.write(buffer, 0, retained)
+            total += count
+            if (total > limit) truncated = true
+        }
+        output.toString(Charsets.UTF_8.name()) + if (truncated) "\n[output truncated]" else ""
     }
 
     private fun extractAsset(asset: String, dest: File): Boolean {
