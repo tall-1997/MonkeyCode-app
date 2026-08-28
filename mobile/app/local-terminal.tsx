@@ -88,9 +88,9 @@ export default function LocalTerminalScreen() {
           <Icons.chevron size={13} color={t.tx2} sw={1.9} />
         </Pressable>
       } />
-      <PrivilegedBanner />
       <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding">
-        <ScrollView ref={scrollRef} style={{ flex: 1 }} contentContainerStyle={{ paddingTop: 56, paddingBottom: insets.bottom + 12, paddingHorizontal: 12 }}>
+        <ScrollView ref={scrollRef} style={{ flex: 1 }} contentContainerStyle={{ paddingTop: insets.top + 64, paddingBottom: insets.bottom + 12, paddingHorizontal: 12 }}>
+          <PrivilegedBanner />
           {!privileged && !linuxAvailable ? (
             <Card style={{ padding: 16, marginTop: 4 }}>
               <Text style={{ fontSize: 13, color: t.tx2, lineHeight: 20 }}>终端未就绪：Linux 环境未安装，且当前无 Root 权限。请先在「特权能力设置」安装 Linux 工具环境。</Text>

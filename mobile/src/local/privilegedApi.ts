@@ -66,6 +66,12 @@ export interface DeviceStatus {
   wifiEnabled: boolean;
 }
 
+export interface UbuntuMirror {
+  id: string;
+  name: string;
+  url: string;
+}
+
 /** 特权 API 门面：所有底层调用收敛到这里，UI 不直接触碰原生模块。 */
 export const privilegedApi = {
   exists: () => Platform.OS === 'android' && !!PrivilegedExecution,
@@ -239,9 +245,19 @@ export const privilegedApi = {
     return PrivilegedExecution.installUbuntu();
   },
 
-  getUbuntuStatus: (): Promise<{ installed: boolean; installing: boolean }> => {
+  getUbuntuStatus: (): Promise<{ installed: boolean; installing: boolean; mirrorId?: string }> => {
     if (!PrivilegedExecution) return Promise.resolve({ installed: false, installing: false });
     return PrivilegedExecution.getUbuntuStatus();
+  },
+
+  getUbuntuMirrors: (): Promise<UbuntuMirror[]> => {
+    if (!PrivilegedExecution) return Promise.resolve([]);
+    return PrivilegedExecution.getUbuntuMirrors();
+  },
+
+  setUbuntuMirror: (id: string): Promise<string> => {
+    if (!PrivilegedExecution) return Promise.reject(new Error('特权模块不可用'));
+    return PrivilegedExecution.setUbuntuMirror(id);
   },
 
   setSandboxType: (type: 'ubuntu' | 'alpine'): Promise<void> => {

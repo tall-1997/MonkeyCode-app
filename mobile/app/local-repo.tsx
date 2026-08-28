@@ -95,11 +95,11 @@ export default function LocalRepoScreen() {
   return (
     <View style={{ flex: 1, backgroundColor: t.bg }}>
       <GlassNav title="本地仓库" onBack={leave} />
-      <PrivilegedBanner />
       <ScrollView
         refreshControl={<RefreshControl refreshing={loading} onRefresh={() => void load()} />}
-        contentContainerStyle={{ paddingTop: 56, paddingBottom: insets.bottom + 40 }}
+        contentContainerStyle={{ paddingTop: insets.top + 64, paddingBottom: insets.bottom + 40 }}
       >
+        <PrivilegedBanner />
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 14, paddingTop: 4 }}>
           <Icons.git size={15} color={t.tx3} sw={1.7} />
           <Text numberOfLines={1} style={{ flex: 1, fontSize: 12, color: t.tx3, fontFamily: 'monospace' }}>{repoPath}</Text>

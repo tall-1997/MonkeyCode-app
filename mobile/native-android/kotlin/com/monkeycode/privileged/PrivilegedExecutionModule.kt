@@ -476,9 +476,10 @@ class PrivilegedExecutionModule(reactContext: ReactApplicationContext) :
     fun installUbuntu(promise: Promise) {
         val t = Thread {
             try {
-                ubuntuEnvironment.install { progress ->
+                ubuntuEnvironment.install { progress, stage ->
                     safeSendEvent("ubuntuInstallProgress", Arguments.createMap().apply {
                         putDouble("progress", progress.toDouble())
+                        putString("stage", stage)
                     })
                 }
                 val result = Arguments.createMap()
@@ -501,9 +502,36 @@ class PrivilegedExecutionModule(reactContext: ReactApplicationContext) :
             val map = Arguments.createMap()
             map.putBoolean("installed", ubuntuEnvironment.isInstalled())
             map.putBoolean("installing", ubuntuEnvironment.isInstalling)
+            map.putString("mirrorId", ubuntuEnvironment.selectedMirror().id)
             promise.resolve(map)
         } catch (e: Exception) {
-            promise.resolve(false)
+            promise.resolve(Arguments.createMap().apply {
+                putBoolean("installed", false)
+                putBoolean("installing", false)
+                putString("mirrorId", ubuntuEnvironment.selectedMirror().id)
+            })
+        }
+    }
+
+    @ReactMethod
+    fun getUbuntuMirrors(promise: Promise) {
+        promise.resolve(Arguments.createArray().apply {
+            ubuntuEnvironment.mirrors().forEach { mirror ->
+                pushMap(Arguments.createMap().apply {
+                    putString("id", mirror.id)
+                    putString("name", mirror.name)
+                    putString("url", mirror.url)
+                })
+            }
+        })
+    }
+
+    @ReactMethod
+    fun setUbuntuMirror(id: String, promise: Promise) {
+        try {
+            promise.resolve(ubuntuEnvironment.selectMirror(id).id)
+        } catch (e: Exception) {
+            promise.reject("UBUNTU_MIRROR_ERROR", e.message)
         }
     }
 

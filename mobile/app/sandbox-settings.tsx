@@ -7,8 +7,8 @@ import { Alert, DeviceEventEmitter, Pressable, ScrollView, Switch, Text, View } 
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Icons } from '@/components/Icons';
 import { PrivilegedBanner } from '@/components/PrivilegedBanner';
-import { Card, GlassNav, PrimaryButton } from '@/components/ui';
-import { privilegedApi } from '@/local/privilegedApi';
+import { Card, GlassNav, PickerSheet, PrimaryButton, type PickerOption } from '@/components/ui';
+import { privilegedApi, type UbuntuMirror } from '@/local/privilegedApi';
 import { permissionDetector } from '@/local/PermissionDetector';
 import { useTheme } from '@/theme';
 
@@ -27,6 +27,10 @@ export default function SandboxSettingsScreen() {
   const [ubuntuInstalled, setUbuntuInstalled] = useState(false);
   const [ubuntuBusy, setUbuntuBusy] = useState(false);
   const [ubuntuProgress, setUbuntuProgress] = useState(0);
+  const [ubuntuStage, setUbuntuStage] = useState('准备安装');
+  const [mirrors, setMirrors] = useState<UbuntuMirror[]>([]);
+  const [mirrorId, setMirrorId] = useState('official');
+  const [mirrorPicking, setMirrorPicking] = useState(false);
   const [terminalEnv, setTerminalEnv] = useState<'android' | 'linux'>('linux');
   const [privileged, setPrivileged] = useState(false);
 
@@ -34,11 +38,21 @@ export default function SandboxSettingsScreen() {
     void (async () => {
       setPrivileged(permissionDetector.isPrivileged());
       setAlpineInstalled(await privilegedApi.isAlpineInstalled());
-      setUbuntuInstalled(await privilegedApi.isUbuntuInstalled().catch(() => false));
+      const [ubuntuStatus, availableMirrors, nativeType] = await Promise.all([
+        privilegedApi.getUbuntuStatus().catch(() => ({ installed: false, installing: false, mirrorId: undefined })),
+        privilegedApi.getUbuntuMirrors().catch(() => []),
+        privilegedApi.getSandboxType().catch(() => 'alpine' as const),
+      ]);
+      setUbuntuInstalled(ubuntuStatus.installed);
+      setUbuntuBusy(ubuntuStatus.installing);
+      setMirrors(availableMirrors);
+      setMirrorId(ubuntuStatus.mirrorId || availableMirrors[0]?.id || 'official');
       const cfg = await loadSandboxConfig();
       if (cfg) {
-        setSandboxType(cfg.type || 'alpine');
+        setSandboxType(nativeType || cfg.type || 'alpine');
         setTerminalEnv(cfg.terminalEnv || 'linux');
+      } else {
+        setSandboxType(nativeType);
       }
     })();
   }, []);
@@ -47,7 +61,11 @@ export default function SandboxSettingsScreen() {
     const sub = DeviceEventEmitter.addListener('alpineInstallProgress', (e: { progress?: number }) => {
       if (typeof e?.progress === 'number') setAlpineProgress(e.progress);
     });
-    return () => { sub.remove(); };
+    const ubuntuSub = DeviceEventEmitter.addListener('ubuntuInstallProgress', (e: { progress?: number; stage?: string }) => {
+      if (typeof e?.progress === 'number') setUbuntuProgress(e.progress);
+      if (e?.stage) setUbuntuStage(e.stage);
+    });
+    return () => { sub.remove(); ubuntuSub.remove(); };
   }, []);
 
   const installAlpine = () => {
@@ -76,6 +94,7 @@ export default function SandboxSettingsScreen() {
         onPress: () => {
           setUbuntuBusy(true);
           setUbuntuProgress(0);
+          setUbuntuStage('准备安装');
           privilegedApi.installUbuntu()
             .then(() => { setUbuntuBusy(false); setUbuntuInstalled(true); Alert.alert('完成', 'Ubuntu 24.04 已就绪。'); })
             .catch((e: Error) => { setUbuntuBusy(false); Alert.alert('错误', e.message); });
@@ -85,9 +104,24 @@ export default function SandboxSettingsScreen() {
   };
 
   const selectType = useCallback(async (type: 'ubuntu' | 'alpine') => {
-    setSandboxType(type);
-    await saveSandboxConfig({ type, terminalEnv });
+    try {
+      await privilegedApi.setSandboxType(type);
+      setSandboxType(type);
+      await saveSandboxConfig({ type, terminalEnv });
+    } catch (e: any) {
+      Alert.alert('切换失败', e.message);
+    }
   }, [terminalEnv]);
+
+  const selectMirror = useCallback(async (id: string) => {
+    try {
+      await privilegedApi.setUbuntuMirror(id);
+      setMirrorId(id);
+      setMirrorPicking(false);
+    } catch (e: any) {
+      Alert.alert('镜像源设置失败', e.message);
+    }
+  }, []);
 
   const toggleTerminalEnv = useCallback(async (v: boolean) => {
     const env = v ? 'linux' : 'android';
@@ -106,8 +140,8 @@ export default function SandboxSettingsScreen() {
   return (
     <View style={{ flex: 1, backgroundColor: t.bg }}>
       <GlassNav title="沙箱设置" onBack={leave} />
-      <PrivilegedBanner />
-      <ScrollView contentContainerStyle={{ paddingTop: 90, paddingBottom: insets.bottom + 40, paddingHorizontal: 14 }}>
+      <ScrollView contentContainerStyle={{ paddingTop: insets.top + 64, paddingBottom: insets.bottom + 40, paddingHorizontal: 14 }}>
+        <PrivilegedBanner />
         <Card style={{ marginTop: 10, overflow: 'hidden' }}>
           <Text style={{ fontSize: 12, fontWeight: '700', color: t.tx3, letterSpacing: 0.5, paddingHorizontal: 16, paddingTop: 14, paddingBottom: 6 }}>沙箱类型</Text>
           <Pressable onPress={() => selectType('ubuntu')}
@@ -130,6 +164,11 @@ export default function SandboxSettingsScreen() {
 
         <Card style={{ marginTop: 12, padding: 16 }}>
           <Text style={{ fontSize: 12, fontWeight: '700', color: t.tx3, letterSpacing: 0.5, marginBottom: 12 }}>Ubuntu 安装状态</Text>
+          <Pressable disabled={ubuntuBusy || mirrors.length === 0} onPress={() => setMirrorPicking(true)} style={{ minHeight: 44, marginBottom: 12, paddingHorizontal: 12, borderRadius: 12, backgroundColor: t.bg3, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Icons.globe size={16} color={t.acTx} />
+            <View style={{ flex: 1 }}><Text style={{ color: t.tx3, fontSize: 11 }}>下载镜像源</Text><Text style={{ color: t.tx, fontSize: 13, fontWeight: '600', marginTop: 2 }}>{mirrors.find((mirror) => mirror.id === mirrorId)?.name || '正在读取'}</Text></View>
+            <Icons.chevron size={15} color={t.tx3} />
+          </Pressable>
           {ubuntuInstalled ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
               <Icons.checkCircle size={18} color={t.add} sw={2} />
@@ -140,7 +179,7 @@ export default function SandboxSettingsScreen() {
               <View style={{ height: 6, borderRadius: 99, backgroundColor: t.track, overflow: 'hidden' }}>
                 <View style={{ height: '100%', width: `${Math.min(100, ubuntuProgress * 100)}%`, backgroundColor: t.ac }} />
               </View>
-              <Text style={{ fontSize: 12, color: t.tx3, textAlign: 'center' }}>{Math.round(ubuntuProgress * 100)}%</Text>
+              <Text style={{ fontSize: 12, color: t.tx3, textAlign: 'center' }}>{ubuntuStage} · {Math.round(ubuntuProgress * 100)}%</Text>
             </View>
           ) : (
             <PrimaryButton label="安装 Ubuntu 24.04" icon="download" onPress={installUbuntu} block />
@@ -190,6 +229,14 @@ export default function SandboxSettingsScreen() {
           </Card>
         ) : null}
       </ScrollView>
+      <PickerSheet
+        title="选择 Ubuntu 镜像源"
+        visible={mirrorPicking}
+        selected={mirrorId}
+        options={mirrors.map<PickerOption>((mirror) => ({ key: mirror.id, title: mirror.name, sub: mirror.url, icon: 'globe' }))}
+        onPick={(id) => void selectMirror(id)}
+        onClose={() => setMirrorPicking(false)}
+      />
     </View>
   );
 }

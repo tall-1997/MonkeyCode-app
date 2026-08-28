@@ -8,6 +8,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.MessageDigest
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
@@ -30,8 +31,19 @@ class UbuntuEnvironment(private val context: Context) {
         private const val ASSET_PROOT = "alpine/proot"
         private const val ASSET_ROOTFS = "ubuntu/rootfs.tar.gz"
 
-        private const val FALLBACK_ROOTFS_URL = "https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04-base-arm64.tar.gz"
+        private const val ROOTFS_FILE = "ubuntu-base-24.04.4-base-arm64.tar.gz"
+        private const val ROOTFS_SHA256 = "04207713ece899c3740823d33690441ad3a7f0ded1101aca744e2b0f37ac7ff2"
         private const val FALLBACK_PROOT_URL = "https://github.com/termux/proot/releases/download/v0.8.3/proot-v0.8.3-android-aarch64.tar.gz"
+
+        data class Mirror(val id: String, val name: String, val baseUrl: String) {
+            val url: String get() = "$baseUrl/$ROOTFS_FILE"
+        }
+
+        val ROOTFS_MIRRORS = listOf(
+            Mirror("official", "Ubuntu 官方", "https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release"),
+            Mirror("tuna", "清华大学 TUNA", "https://mirrors.tuna.tsinghua.edu.cn/ubuntu-cdimage/ubuntu-base/releases/24.04/release"),
+            Mirror("aliyun", "阿里云", "https://mirrors.aliyun.com/ubuntu-cdimage/ubuntu-base/releases/24.04/release")
+        )
 
         val TOOL_PACKAGES = listOf(
             "git", "python3", "python3-pip", "python3-venv",
@@ -49,12 +61,32 @@ class UbuntuEnvironment(private val context: Context) {
     private val prootBin: File get() = File(ubuntuDir, "proot")
     private val libsDir: File get() = File(ubuntuDir, "libs")
     private val workspaceDir: File get() = File(context.filesDir, "workspace")
+    private val installMarker: File get() = File(ubuntuDir, ".installed-$ROOTFS_FILE")
+    private val preferences = context.getSharedPreferences("privileged_execution", 0)
 
     private var _installing = false
     val isInstalling: Boolean get() = _installing
 
     fun isInstalled(): Boolean {
-        return File(rootfsDir, "etc/lsb-release").exists() && prootBin.exists()
+        val systemReady = File(rootfsDir, "etc/os-release").exists() && prootBin.exists()
+        if (systemReady && !installMarker.exists() && File(rootfsDir, "etc/lsb-release").exists()) {
+            installMarker.writeText("legacy")
+        }
+        return systemReady && installMarker.exists()
+    }
+
+    fun mirrors(): List<Mirror> = ROOTFS_MIRRORS
+
+    fun selectedMirror(): Mirror {
+        val id = preferences.getString("ubuntu_mirror", ROOTFS_MIRRORS.first().id)
+        return ROOTFS_MIRRORS.find { it.id == id } ?: ROOTFS_MIRRORS.first()
+    }
+
+    fun selectMirror(id: String): Mirror {
+        val mirror = ROOTFS_MIRRORS.find { it.id == id }
+            ?: throw IllegalArgumentException("无效的 Ubuntu 镜像源")
+        preferences.edit().putString("ubuntu_mirror", mirror.id).apply()
+        return mirror
     }
 
     /**
@@ -65,7 +97,9 @@ class UbuntuEnvironment(private val context: Context) {
      *  4. 解压 rootfs（用系统 tar）
      *  5. 工作区挂载点
      */
-    fun install(onProgress: (Float) -> Unit) {
+    @Synchronized
+    fun install(onProgress: (Float, String) -> Unit) {
+        if (_installing) throw IllegalStateException("Ubuntu 正在安装")
         _installing = true
         try {
             ubuntuDir.mkdirs()
@@ -78,15 +112,15 @@ class UbuntuEnvironment(private val context: Context) {
                 val fromAssets = extractAsset(ASSET_PROOT, prootBin)
                 if (!fromAssets) {
                     progress = 0.05f
-                    onProgress(progress)
-                    downloadProot(prootBin, { p -> onProgress(progress + p * 0.2f) })
+                    onProgress(progress, "正在下载 PRoot")
+                    downloadProot(prootBin, { p -> onProgress(progress + p * 0.2f, "正在下载 PRoot") })
                     if (!prootBin.exists() || prootBin.length() < 1024) {
                         throw IllegalStateException("PRoot 获取失败，请检查网络或重新安装应用")
                     }
                 }
                 prootBin.setExecutable(true)
             }
-            onProgress(0.3f)
+            onProgress(0.3f, "正在准备运行库")
 
             // 2) 依赖库
             if (libsDir.listFiles()?.isEmpty() != false) {
@@ -94,28 +128,35 @@ class UbuntuEnvironment(private val context: Context) {
             }
 
             // 3) rootfs tarball
-            val tarball = File(ubuntuDir, "rootfs.tar.gz")
-            if (!tarball.exists()) {
+            val tarball = File(ubuntuDir, ROOTFS_FILE)
+            if (!tarball.exists() || !verifySha256(tarball, ROOTFS_SHA256)) {
+                if (tarball.exists()) tarball.delete()
                 val fromAssets = extractAsset(ASSET_ROOTFS, tarball)
-                if (!fromAssets) {
-                    onProgress(0.35f)
-                    downloadRootfs(tarball, { p -> onProgress(0.35f + p * 0.4f) })
+                if (!fromAssets || !verifySha256(tarball, ROOTFS_SHA256)) {
+                    if (tarball.exists()) tarball.delete()
+                    onProgress(0.35f, "正在下载 Ubuntu RootFS")
+                    downloadRootfs(tarball, { p -> onProgress(0.35f + p * 0.4f, "正在下载 Ubuntu RootFS") })
                 }
             }
-            onProgress(0.75f)
+            if (!verifySha256(tarball, ROOTFS_SHA256)) {
+                tarball.delete()
+                throw IllegalStateException("Ubuntu RootFS 完整性校验失败")
+            }
+            onProgress(0.75f, "正在校验 Ubuntu RootFS")
 
             // 4) 解压
-            if (File(rootfsDir, "etc/lsb-release").exists().not() || rootfsDir.listFiles()?.isEmpty() == true) {
+            if (!isInstalled()) {
                 rootfsDir.deleteRecursively()
                 rootfsDir.mkdirs()
                 extractTarball(tarball, rootfsDir)
             }
-            onProgress(0.9f)
+            onProgress(0.9f, "正在配置 Ubuntu")
 
             // 5) 工作区挂载点
             File(rootfsDir, "workspace").mkdirs()
             File(rootfsDir, "sdcard").mkdirs()
-            onProgress(1f)
+            installMarker.writeText(ROOTFS_SHA256)
+            onProgress(1f, "Ubuntu 已就绪")
         } finally {
             _installing = false
         }
@@ -255,28 +296,75 @@ class UbuntuEnvironment(private val context: Context) {
     }
 
     private fun downloadRootfs(tarball: File, onProgress: (Float) -> Unit) {
-        downloadTo(FALLBACK_ROOTFS_URL, tarball, onProgress)
+        downloadTo(selectedMirror().url, tarball, onProgress)
     }
 
     private fun downloadTo(urlStr: String, dest: File, onProgress: (Float) -> Unit) {
-        val url = URL(urlStr)
-        val conn = url.openConnection() as HttpURLConnection
-        conn.connectTimeout = 30000
-        conn.readTimeout = 600000
-        val total = conn.contentLength
-        FileOutputStream(dest).use { out ->
-            conn.inputStream.use { input ->
-                val buf = ByteArray(8192)
-                var read: Int
-                var done = 0L
-                while (input.read(buf).also { read = it } != -1) {
-                    out.write(buf, 0, read)
-                    done += read
-                    if (total > 0) onProgress(done.toFloat() / total)
+        val part = File(dest.parentFile, "${dest.name}.part")
+        if (part.exists()) part.delete()
+        var conn: HttpURLConnection? = null
+        try {
+            var current = URL(urlStr)
+            for (redirect in 0..5) {
+                conn = current.openConnection() as HttpURLConnection
+                conn!!.instanceFollowRedirects = false
+                conn!!.connectTimeout = 30000
+                conn!!.readTimeout = 600000
+                conn!!.setRequestProperty("User-Agent", "MonkeyCode-Mobile/1.0")
+                val code = conn!!.responseCode
+                if (code in 300..399) {
+                    val location = conn!!.getHeaderField("Location")
+                        ?: throw IOException("镜像源重定向缺少目标地址")
+                    current = URL(current, location)
+                    conn!!.disconnect()
+                    conn = null
+                    if (redirect == 5) throw IOException("镜像源重定向次数过多")
+                } else {
+                    if (code !in 200..299) throw IOException("镜像源返回 HTTP $code")
+                    break
                 }
             }
+            val active = conn ?: throw IOException("无法连接镜像源")
+            val total = active.contentLengthLong
+            FileOutputStream(part).use { out ->
+                active.inputStream.use { input ->
+                    val buf = ByteArray(64 * 1024)
+                    var done = 0L
+                    while (true) {
+                        val read = input.read(buf)
+                        if (read < 0) break
+                        out.write(buf, 0, read)
+                        done += read
+                        if (total > 0) onProgress(done.toFloat() / total)
+                    }
+                }
+                out.fd.sync()
+            }
+            if (total > 0 && part.length() != total) throw IOException("下载文件大小不完整")
+            if (!part.renameTo(dest)) {
+                part.copyTo(dest, overwrite = true)
+                part.delete()
+            }
+        } catch (e: Exception) {
+            part.delete()
+            throw e
+        } finally {
+            conn?.disconnect()
         }
-        conn.disconnect()
+    }
+
+    private fun verifySha256(file: File, expected: String): Boolean {
+        if (!file.isFile || file.length() == 0L) return false
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }.equals(expected, ignoreCase = true)
     }
 
     private fun extractTarball(tarball: File, dest: File) {

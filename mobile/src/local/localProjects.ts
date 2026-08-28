@@ -17,6 +17,19 @@ export interface LocalSessionSummary {
   updatedAt: number;
 }
 
+export async function getLocalSession(id: string): Promise<LocalSessionSummary | null> {
+  const db = await getDatabase();
+  const row = await db.getFirstAsync<{ id: string; title: string; status: string; engine_id: string | null; updated_at: number }>(
+    `SELECT s.id, t.title, s.status, s.engine_id, s.updated_at
+     FROM local_sessions s JOIN local_tasks t ON t.id = s.task_id
+     WHERE s.id = ?`,
+    id,
+  );
+  return row
+    ? { id: row.id, title: row.title, status: row.status, engineId: row.engine_id ?? undefined, updatedAt: row.updated_at }
+    : null;
+}
+
 export async function listLocalProjects(): Promise<LocalProject[]> {
   const db = await getDatabase();
   const rows = await db.getAllAsync<{ id: string; name: string; path: string; remote_url: string | null; created_at: number; updated_at: number }>(

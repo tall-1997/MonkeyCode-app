@@ -61,10 +61,11 @@ export default function TasksScreen() {
 
           <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}><Text style={{ flex: 1, color: t.tx, fontSize: 17, fontWeight: '700' }}>最近会话</Text><Pressable onPress={() => router.push('/(tabs)/activity')} style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 4 }}><Text style={{ color: t.acTx, fontWeight: '700' }}>查看全部</Text></Pressable></View>
           {sessions.length ? sessions.map((session) => (
-            <Card key={session.id} style={{ minHeight: 68, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+            <Card key={session.id} onPress={() => router.push({ pathname: '/local-agent', params: { sessionId: session.id, engineId: session.engineId || '' } })} style={{ minHeight: 68, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12 }}>
               <View style={{ width: 38, height: 38, borderRadius: 12, backgroundColor: t.acGhost, alignItems: 'center', justifyContent: 'center' }}><Icons.robot size={19} color={t.acTx} /></View>
               <View style={{ flex: 1 }}><Text numberOfLines={1} style={{ color: t.tx, fontSize: 14.5, fontWeight: '600' }}>{session.title}</Text><Text style={{ color: t.tx3, fontSize: 12, marginTop: 4 }}>{new Date(session.updatedAt).toLocaleString('zh-CN')}</Text></View>
               <Pill color={t.acTx} bg={t.acGhost}>{session.status === 'running' ? '运行中' : '已结束'}</Pill>
+              <Icons.chevron size={16} color={t.tx3} />
             </Card>
           )) : <Card style={{ padding: 18 }}><Text style={{ color: t.tx2, fontSize: 13.5 }}>首个本地会话会显示在这里。</Text></Card>}
         </View>
