@@ -369,7 +369,7 @@ class BrowserService(private val context: Context) {
     private fun checkAlive() = check(!destroyed.get()) { "浏览器已销毁" }
 
     private fun await(latch: CountDownLatch, timeoutMs: Long, operation: String) {
-        if (!latch.await(timeoutMs, TimeUnit.MILLISECONDS)) throw TimeoutException("$operation超时 (${timeoutMs}ms)")
+        if (!latch.await(timeoutMs, TimeUnit.MILLISECONDS)) throw TimeoutException("${operation}超时 (${timeoutMs}ms)")
     }
 
     private fun <T> serialized(block: () -> T): T = synchronized(operationLock) {
